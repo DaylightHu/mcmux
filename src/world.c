@@ -202,7 +202,7 @@ const char *world_error_message(const World *w)
 void world_clear_error(World *w)
 {
     if (!w || !w->sim || !w->action_error_recoverable ||
-        w->sim->handling_tick || w->sim->block_entities.ticking ||
+        w->sim->handling_tick || w->sim->block_entities.ticking || w->sim->checking ||
         w->sim->error != w->action_error) return;
     w->sim->error = RS_OK;
     w->action_error = RS_OK;

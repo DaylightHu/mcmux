@@ -15,6 +15,23 @@ typedef struct {
     uint8_t received;  /* Any incident signal, e.g. dust can turn off a torch. */
     uint8_t strong;    /* Direct signal with ALL wire outputs suppressed. */
 } SolidPower;
+/* Runs after a complete game tick, including block events and block entities.
+ * May read the world and call world_expect(). It must not edit, save, destroy,
+ * advance time, clear errors or change the check while it is running.
+ * Context may hold caller-owned observation history and timing conditions. */
+typedef void (*SimCheck)(World *world, void *context);
+
+/* One optional runtime check per world. Replace it or pass NULL to detach.
+ * The callback/context are borrowed until replacement, detachment or destroy;
+ * they are not saved in MCW/MCS files. Registration does not invoke the check.
+ * Checks run once after each tick's timed phases finish without an engine
+ * error, whether advanced by sim_step() or sim_advance_ticks(). No check runs
+ * on zero ticks, flush, edits or a step blocked by freezing. A failed check
+ * stops further ticks, retaining the completed tick's state and time.
+ * world_result()/world_error_message() report the first error.
+ * Register between ticks/checks. Failures use the world's action error policy.
+ * A NULL world or a world with a previous error is ignored. */
+void sim_set_check(World *world, SimCheck check, void *context);
 
 /* Edits synchronously settle neighbor/shape notifications, dust and rails.
  * flush reports the current status without advancing time.
@@ -31,8 +48,9 @@ RsResult sim_step(World *world);
 /* Synchronously advance a fixed number of game ticks without real-time pacing.
  * Advances even when frozen, preserving the freeze flag and previously queued
  * manual steps. Zero ticks does not advance time.
- * Calls during tick processing and requests that overflow time with queued
- * steps are rejected before advancing. Stops at the first simulation error;
+ * Calls during tick processing/checks and requests that overflow time with
+ * queued steps are rejected before advancing. Stops at the first error,
+ * including an error raised by the registered check;
  * completed time and state changes are retained. Errors are retained by the
  * world; read world_result() and world_error_message(). Read world_tick() for
  * progress. A NULL world is ignored. */

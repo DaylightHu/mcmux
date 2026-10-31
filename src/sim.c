@@ -363,6 +363,18 @@ RsResult sim_flush(World *w)
     if (!w) return RS_INVALID_ARGUMENT;
     return w->sim->error;
 }
+void sim_set_check(World *w, SimCheck check, void *context)
+{
+    if (!world_action_ready(w, "sim_set_check", NULL)) return;
+    Simulator *s = w->sim;
+    if (s->handling_tick || s->block_entities.ticking || s->checking) {
+        world_record_error(w, RS_INVALID_ARGUMENT, "sim_set_check", NULL,
+                           "cannot change a check during tick processing or a check");
+        return;
+    }
+    s->check = check;
+    s->check_context = check ? context : NULL;
+}
 bool sim_is_frozen(const World *w)
 {
     return w && w->sim->frozen;
@@ -412,6 +424,11 @@ RsResult sim_step(World *w)
     RsResult result = sim_flush(w);
     if (result != RS_OK) return result;
     Simulator *s = w->sim;
+    if (s->checking) {
+        world_record_error(w, RS_INVALID_ARGUMENT, "sim_step", NULL,
+                           "cannot advance time from a simulation check");
+        return s->error;
+    }
     if (s->frozen && !s->manual_steps) return RS_UNCHANGED;
     if (w->tick == UINT64_MAX) return RS_INTERNAL_ERROR;
     ++w->tick;
@@ -459,11 +476,18 @@ RsResult sim_step(World *w)
     /* ServerLevel clears handlingTick before ticking block entities. */
     s->handling_tick = false;
     tick_block_entities(w);
+    if (s->error == RS_OK && s->check) {
+        s->checking = true;
+        s->check(w, s->check_context);
+        s->checking = false;
+        (void)world_action_ready(w, "sim_check", NULL);
+    }
     return s->error;
 }
 static RsResult advance_ticks(World *w, uint32_t ticks)
 {
-    if (!w || w->sim->handling_tick || w->sim->block_entities.ticking)
+    if (!w || w->sim->handling_tick || w->sim->block_entities.ticking ||
+        w->sim->checking)
         return RS_INVALID_ARGUMENT;
     RsResult result = sim_flush(w);
     if (result != RS_OK) return result;

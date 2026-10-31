@@ -48,8 +48,9 @@ RsResult world_result(const World *world);
 const char *world_error_message(const World *world);
 /* Clear a validation, expectation or file error after handling it, without
  * undoing edits. Internal/allocation failures and errors raised during tick
- * processing cannot be cleared. No effect during tick processing. A GUI can
- * clear a rejected edit before accepting the next one. */
+ * processing cannot be cleared. No effect during tick processing or a
+ * registered check. A GUI can clear a rejected edit before accepting the next
+ * one. */
 void world_clear_error(World *world);
 /* Check a C condition immediately, without advancing time or changing blocks.
  * False retains RS_EXPECTATION_FAILED and reports the current game tick plus

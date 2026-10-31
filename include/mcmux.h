@@ -59,6 +59,11 @@ void writeback_mcs(World *world, const char *mcs_path,
 /* Advance a fixed number of game ticks synchronously. */
 // void sim_advance_ticks(World *world, uint32_t ticks);
 
+/* Register one runtime check, called after every complete game tick. The check
+ * reads current state and uses world_expect() to report failures. It may keep
+ * timing/history in caller-owned context. Pass NULL to detach. */
+// void sim_set_check(World *world, SimCheck check, void *context);
+
 /* Check any read-only C condition at the current game tick. False retains
  * RS_EXPECTATION_FAILED and reports a printf-style message. This does not
  * advance time or register a future/continuous check; arguments are evaluated
