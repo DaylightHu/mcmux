@@ -59,6 +59,12 @@ void writeback_mcs(World *world, const char *mcs_path,
 /* Advance a fixed number of game ticks synchronously. */
 // void sim_advance_ticks(World *world, uint32_t ticks);
 
+/* Check any read-only C condition at the current game tick. False retains
+ * RS_EXPECTATION_FAILED and reports a printf-style message. This does not
+ * advance time or register a future/continuous check; arguments are evaluated
+ * by C even after a previous error. NULL/empty format uses a default message. */
+// void world_expect(World *world, bool condition, const char *format, ...);
+
 /* Inspect the first failure at the end of a sequence of actions, or handle a
  * recoverable error and clear it before continuing interactive editing. */
 // RsResult world_result(const World *world);

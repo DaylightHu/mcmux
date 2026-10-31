@@ -6,6 +6,7 @@
 #include "worldgen.h"
 #include <inttypes.h>
 #include <limits.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef _WIN32
@@ -235,6 +236,24 @@ bool world_action_ready(World *w, const char *operation, const BlockPos *pos)
     if (result == RS_OK) return true;
     world_record_error(w, result, operation, pos, rs_result_name(result));
     return false;
+}
+void world_expect(World *w, bool condition, const char *format, ...)
+{
+    if (!world_action_ready(w, "world_expect", NULL) || condition) return;
+    char detail[384];
+    int length = 0;
+    if (format && *format) {
+        va_list args;
+        va_start(args, format);
+        length = vsnprintf(detail, sizeof(detail), format, args);
+        va_end(args);
+    }
+    if (length <= 0) {
+        snprintf(detail, sizeof(detail), "condition is false");
+    } else if ((size_t)length >= sizeof(detail)) {
+        memcpy(detail + sizeof(detail) - 4, "...", 4);
+    }
+    world_record_error(w, RS_EXPECTATION_FAILED, "world_expect", NULL, detail);
 }
 bool world_in_bounds(const World *w, BlockPos p)
 {
@@ -833,6 +852,6 @@ void world_set_change_observer(World *w, WorldChangeObserver observer, void *con
 }
 const char *rs_result_name(RsResult result)
 {
-    static const char *const names[] = {"ok", "unchanged", "out of bounds", "unsupported", "invalid argument", "out of memory", "internal error", "I/O error", "corrupt data"};
+    static const char *const names[] = {"ok", "unchanged", "out of bounds", "unsupported", "invalid argument", "out of memory", "internal error", "I/O error", "corrupt data", "expectation failed"};
     return (unsigned)result < sizeof(names) / sizeof(names[0]) ? names[result] : "unknown";
 }
