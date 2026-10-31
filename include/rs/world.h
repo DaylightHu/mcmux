@@ -12,7 +12,7 @@ typedef void (*WorldChangeObserver)(void *context, BlockPos pos,
 typedef enum {
     RS_OK = 0, RS_UNCHANGED, RS_OUT_OF_BOUNDS, RS_UNSUPPORTED,
     RS_INVALID_ARGUMENT, RS_OUT_OF_MEMORY, RS_INTERNAL_ERROR,
-    RS_IO_ERROR, RS_CORRUPT_DATA
+    RS_IO_ERROR, RS_CORRUPT_DATA, RS_EXPECTATION_FAILED
 } RsResult;
 enum { CHUNK_SIZE = 16, SECTION_VOLUME = 4096, WORLD_MIN_Y = -64,
        WORLD_MAX_Y = 319, SECTION_COUNT = 24, STATE_ID_LIMIT = 32768,
@@ -46,11 +46,24 @@ void world_destroy(World *world);
 RsResult world_result(const World *world);
 /* Empty when healthy. The returned message is borrowed until clear/destroy. */
 const char *world_error_message(const World *world);
-/* Clear a validation or file error after handling it, without undoing edits.
- * Internal/allocation failures and errors raised during tick processing cannot
- * be cleared. No effect during tick processing. A GUI can clear a rejected
- * edit before accepting the next one. */
+/* Clear a validation, expectation or file error after handling it, without
+ * undoing edits. Internal/allocation failures and errors raised during tick
+ * processing cannot be cleared. No effect during tick processing. A GUI can
+ * clear a rejected edit before accepting the next one. */
 void world_clear_error(World *world);
+/* Check a C condition immediately, without advancing time or changing blocks.
+ * False retains RS_EXPECTATION_FAILED and reports the current game tick plus
+ * the printf-style message. NULL/empty format uses "condition is false";
+ * long messages are truncated. Checks remain active when NDEBUG is defined.
+ * C evaluates the condition and message arguments before this call, even if
+ * the world already has an error. Use read-only expressions/predicate calls.
+ * An error already present in the world takes precedence. Later actions are
+ * ignored until explicitly cleared. A NULL world is ignored like other void
+ * actions. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 3, 4)))
+#endif
+void world_expect(World *world, bool condition, const char *format, ...);
 bool world_in_bounds(const World *world, BlockPos pos);
 WorldPlotBounds world_plot_bounds(const World *world);
 RsResult world_expand_plot(World *world, Direction direction, uint32_t count);
