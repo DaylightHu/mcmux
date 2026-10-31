@@ -15,23 +15,32 @@ typedef struct {
     uint8_t received;  /* Any incident signal, e.g. dust can turn off a torch. */
     uint8_t strong;    /* Direct signal with ALL wire outputs suppressed. */
 } SolidPower;
-/* Runs after a complete game tick, including block events and block entities.
- * May read the world and call world_expect(). It must not edit, save, destroy,
- * advance time, clear errors or change the check while it is running.
- * Context may hold caller-owned observation history and timing conditions. */
-typedef void (*SimCheck)(World *world, void *context);
+/* Read current state and return whether the condition holds. The library
+ * reports false as RS_EXPECTATION_FAILED; an existing read/world error wins.
+ * Must not edit, save, destroy, advance time, clear errors or change the check.
+ * Optional context may hold caller-owned parameters or observation history. */
+typedef bool (*SimCheck)(const World *world, void *context);
+typedef struct {
+    SimCheck check;        /* NULL detaches; other fields are then ignored. */
+    uint64_t after_ticks;  /* Game ticks from registration until checking starts. */
+    void *context;         /* Optional, borrowed until replacement/detach/destroy. */
+    const char *message;   /* Optional failure message; copied and may be truncated. */
+} SimCheckConfig;
 
-/* One optional runtime check per world. Replace it or pass NULL to detach.
- * The callback/context are borrowed until replacement, detachment or destroy;
- * they are not saved in MCW/MCS files. Registration does not invoke the check.
- * Checks run once after each tick's timed phases finish without an engine
- * error, whether advanced by sim_step() or sim_advance_ticks(). No check runs
- * on zero ticks, flush, edits or a step blocked by freezing. A failed check
- * stops further ticks, retaining the completed tick's state and time.
- * world_result()/world_error_message() report the first error.
- * Register between ticks/checks. Failures use the world's action error policy.
- * A NULL world or a world with a previous error is ignored. */
-void sim_set_check(World *world, SimCheck check, void *context);
+/* One optional runtime check per world; registration replaces the previous one.
+ * The config and message are copied. The function/context must remain valid
+ * until replacement, detachment or destroy. Checks are not saved in MCW/MCS.
+ * Registration never calls the predicate. It first runs after a complete tick
+ * reaches registration_tick + after_ticks, then after every complete tick.
+ * Zero delay starts at the next complete tick. Overflow rejects registration.
+ * Includes block events/entities; skips engine failures and non-advancing
+ * calls (zero ticks, flush, edits or a step blocked by freezing).
+ * False retains the first failure, stops further ticks and blocks saves;
+ * completed time/state are retained. A missing/empty message uses a default.
+ * Read world_result()/world_error_message(). Register between ticks/checks;
+ * errors use the world's action error policy. NULL/failed worlds are ignored.
+ * Pass (SimCheckConfig){0} to detach. */
+void sim_set_check(World *world, SimCheckConfig config);
 
 /* Edits synchronously settle neighbor/shape notifications, dust and rails.
  * flush reports the current status without advancing time.
