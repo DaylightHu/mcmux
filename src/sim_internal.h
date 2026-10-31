@@ -61,9 +61,14 @@ struct Simulator {
     TorchRuntime *torches;
     size_t torch_used, torch_capacity, free_torch;
     SimStats stats;
+    SimCheck check;
+    void *check_context;
+    uint64_t check_from;
+    char check_message[384];
     RsResult error;
     uint64_t manual_steps;
     bool handling_tick;
+    bool checking;
     bool frozen;
     bool updates_suppressed;
 };

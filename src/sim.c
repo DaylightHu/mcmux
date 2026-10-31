@@ -1,6 +1,7 @@
 #include "sim_internal.h"
 #include "wire_solver.h"
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -363,6 +364,34 @@ RsResult sim_flush(World *w)
     if (!w) return RS_INVALID_ARGUMENT;
     return w->sim->error;
 }
+void sim_set_check(World *w, SimCheckConfig config)
+{
+    if (!world_action_ready(w, "sim_set_check", NULL)) return;
+    Simulator *s = w->sim;
+    if (s->handling_tick || s->block_entities.ticking || s->checking) {
+        world_record_error(w, RS_INVALID_ARGUMENT, "sim_set_check", NULL,
+                           "cannot change a check during tick processing or a check");
+        return;
+    }
+    if (config.check && config.after_ticks > UINT64_MAX - w->tick) {
+        world_record_error(w, RS_INVALID_ARGUMENT, "sim_set_check", NULL,
+                           "check start time would overflow");
+        return;
+    }
+    s->check = config.check;
+    s->check_context = config.check ? config.context : NULL;
+    s->check_from = config.check ? w->tick + config.after_ticks : 0;
+    s->check_message[0] = '\0';
+    if (config.check) {
+        const char *message = config.message && *config.message ?
+                              config.message : "simulation check failed";
+        int length = snprintf(s->check_message, sizeof(s->check_message), "%s", message);
+        if (length < 0)
+            snprintf(s->check_message, sizeof(s->check_message), "simulation check failed");
+        else if ((size_t)length >= sizeof(s->check_message))
+            memcpy(s->check_message + sizeof(s->check_message) - 4, "...", 4);
+    }
+}
 bool sim_is_frozen(const World *w)
 {
     return w && w->sim->frozen;
@@ -412,6 +441,11 @@ RsResult sim_step(World *w)
     RsResult result = sim_flush(w);
     if (result != RS_OK) return result;
     Simulator *s = w->sim;
+    if (s->checking) {
+        world_record_error(w, RS_INVALID_ARGUMENT, "sim_step", NULL,
+                           "cannot advance time from a simulation check");
+        return s->error;
+    }
     if (s->frozen && !s->manual_steps) return RS_UNCHANGED;
     if (w->tick == UINT64_MAX) return RS_INTERNAL_ERROR;
     ++w->tick;
@@ -459,11 +493,18 @@ RsResult sim_step(World *w)
     /* ServerLevel clears handlingTick before ticking block entities. */
     s->handling_tick = false;
     tick_block_entities(w);
+    if (s->error == RS_OK && s->check && w->tick >= s->check_from) {
+        s->checking = true;
+        bool matches = s->check(w, s->check_context);
+        world_expect(w, matches, "%s", s->check_message);
+        s->checking = false;
+    }
     return s->error;
 }
 static RsResult advance_ticks(World *w, uint32_t ticks)
 {
-    if (!w || w->sim->handling_tick || w->sim->block_entities.ticking)
+    if (!w || w->sim->handling_tick || w->sim->block_entities.ticking ||
+        w->sim->checking)
         return RS_INVALID_ARGUMENT;
     RsResult result = sim_flush(w);
     if (result != RS_OK) return result;

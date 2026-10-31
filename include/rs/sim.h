@@ -15,6 +15,32 @@ typedef struct {
     uint8_t received;  /* Any incident signal, e.g. dust can turn off a torch. */
     uint8_t strong;    /* Direct signal with ALL wire outputs suppressed. */
 } SolidPower;
+/* Read current state and return whether the condition holds. The library
+ * reports false as RS_EXPECTATION_FAILED; an existing read/world error wins.
+ * Must not edit, save, destroy, advance time, clear errors or change the check.
+ * Optional context may hold caller-owned parameters or observation history. */
+typedef bool (*SimCheck)(const World *world, void *context);
+typedef struct {
+    SimCheck check;        /* NULL detaches; other fields are then ignored. */
+    uint64_t after_ticks;  /* Game ticks from registration until checking starts. */
+    void *context;         /* Optional, borrowed until replacement/detach/destroy. */
+    const char *message;   /* Optional failure message; copied and may be truncated. */
+} SimCheckConfig;
+
+/* One optional runtime check per world; registration replaces the previous one.
+ * The config and message are copied. The function/context must remain valid
+ * until replacement, detachment or destroy. Checks are not saved in MCW/MCS.
+ * Registration never calls the predicate. It first runs after a complete tick
+ * reaches registration_tick + after_ticks, then after every complete tick.
+ * Zero delay starts at the next complete tick. Overflow rejects registration.
+ * Includes block events/entities; skips engine failures and non-advancing
+ * calls (zero ticks, flush, edits or a step blocked by freezing).
+ * False retains the first failure, stops further ticks and blocks saves;
+ * completed time/state are retained. A missing/empty message uses a default.
+ * Read world_result()/world_error_message(). Register between ticks/checks;
+ * errors use the world's action error policy. NULL/failed worlds are ignored.
+ * Pass (SimCheckConfig){0} to detach. */
+void sim_set_check(World *world, SimCheckConfig config);
 
 /* Edits synchronously settle neighbor/shape notifications, dust and rails.
  * flush reports the current status without advancing time.
@@ -31,8 +57,9 @@ RsResult sim_step(World *world);
 /* Synchronously advance a fixed number of game ticks without real-time pacing.
  * Advances even when frozen, preserving the freeze flag and previously queued
  * manual steps. Zero ticks does not advance time.
- * Calls during tick processing and requests that overflow time with queued
- * steps are rejected before advancing. Stops at the first simulation error;
+ * Calls during tick processing/checks and requests that overflow time with
+ * queued steps are rejected before advancing. Stops at the first error,
+ * including an error raised by the registered check;
  * completed time and state changes are retained. Errors are retained by the
  * world; read world_result() and world_error_message(). Read world_tick() for
  * progress. A NULL world is ignored. */

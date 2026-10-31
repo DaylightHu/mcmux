@@ -59,6 +59,11 @@ void writeback_mcs(World *world, const char *mcs_path,
 /* Advance a fixed number of game ticks synchronously. */
 // void sim_advance_ticks(World *world, uint32_t ticks);
 
+/* Register a read-only boolean predicate. after_ticks sets the initial delay;
+ * after that it runs at every complete tick. The library records failures.
+ * Context/message are optional; pass (SimCheckConfig){0} to detach. */
+// void sim_set_check(World *world, SimCheckConfig config);
+
 /* Check any read-only C condition at the current game tick. False retains
  * RS_EXPECTATION_FAILED and reports a printf-style message. This does not
  * advance time or register a future/continuous check; arguments are evaluated
