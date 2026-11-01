@@ -64,7 +64,7 @@ mc-nvim's `:` commands operate on editor files and programs.
 | `//stack [COUNT] DIRECTION` | Add repeated copies in a direction. |
 | `//move [DISTANCE] DIRECTION` | Move the selected blocks. |
 | `//undo` / `//redo` | Undo or redo the last selection edit. |
-| `//schem save [-f] NAME [X Y Z]` | Save the selection to `structures/NAME.mcs`; `-f` replaces an existing file. |
+| `//schem save [-f] NAME [X Y Z]` | Save the selection beside the current world's `.mcw`; `-f` replaces an existing file. |
 | `/tick freeze` | Toggle automatic ticking. |
 | `/tick step NUMBER` | Run a fixed number of ticks while frozen. |
 | `/tick noupdate` | Toggle block callbacks and neighbor updates. |

@@ -7,11 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#ifdef _WIN32
-#include <direct.h>
-#else
-#include <sys/stat.h>
-#endif
 
 static bool integer(const char *text, int *value)
 {
@@ -155,18 +150,30 @@ static RsResult save_structure(GameSession *session, const EditCommand *c,
         snprintf(message,capacity,"Set both pos1 and pos2 first");
         return RS_INVALID_ARGUMENT;
     }
+    const char *save_path=game_session_path(session);
+    if (!save_path || !*save_path) {
+        snprintf(message,capacity,"Current world has no save path");
+        return RS_INVALID_ARGUMENT;
+    }
+    const char *separator=strrchr(save_path,'/');
+#ifdef _WIN32
+    const char *backslash=strrchr(save_path,'\\');
+    if (!separator || (backslash && backslash>separator)) separator=backslash;
+#endif
+    size_t directory_length=separator ? (size_t)(separator-save_path) : 0;
+    char path[GAME_SESSION_PATH_CAPACITY];
+    int written=snprintf(path,sizeof(path),"%.*s%s%.*s.mcs",
+        (int)directory_length,save_path,directory_length ? "/" : "",
+        (int)length,c->name);
+    if (written<=0 || written>=(int)sizeof(path)) {
+        snprintf(message,capacity,"Structure path is too long");
+        return RS_INVALID_ARGUMENT;
+    }
     StructureResult saved;
     Structure *structure=structure_capture(game_session_world(session),bounds.min,bounds.max,
         c->has_position ? &c->position : NULL,&saved);
     if (structure) {
-        char path[96];
-        snprintf(path,sizeof(path),"structures/%.*s.mcs",(int)length,c->name);
-#ifdef _WIN32
-        bool directory=_mkdir("structures")==0 || errno==EEXIST;
-#else
-        bool directory=mkdir("structures",0755)==0 || errno==EEXIST;
-#endif
-        saved=directory ? structure_write(structure,path,c->overwrite) : STRUCTURE_IO_ERROR;
+        saved=structure_write(structure,path,c->overwrite);
         if (saved==STRUCTURE_OK) {
             StructureInfo info=structure_info(structure);
             snprintf(message,capacity,"Saved %zu cells to %s; anchor (%d, %d, %d)",

@@ -32,6 +32,24 @@ struct GameSession {
     bool has_saved;
 };
 
+static bool ensure_directory(const char *directory);
+
+static bool ensure_save_parent(const char *path)
+{
+    const char *separator = strrchr(path, '/');
+#ifdef _WIN32
+    const char *backslash = strrchr(path, '\\');
+    if (!separator || (backslash && backslash > separator)) separator = backslash;
+#endif
+    if (!separator) return true;
+    size_t length = (size_t)(separator - path);
+    if (!length || length >= GAME_SESSION_PATH_CAPACITY) return false;
+    char directory[GAME_SESSION_PATH_CAPACITY];
+    memcpy(directory, path, length);
+    directory[length] = '\0';
+    return ensure_directory(directory);
+}
+
 static void set_result(GameSessionResult *target, GameSessionResult value)
 {
     if (target) *target = value;
@@ -146,6 +164,8 @@ GameSessionResult game_session_save(GameSession *session)
         return GAME_SESSION_INVALID_ARGUMENT;
     if (sim_flush(session->world) != RS_OK)
         return GAME_SESSION_SIMULATION_ERROR;
+    if (!ensure_save_parent(session->save_path))
+        return GAME_SESSION_IO_ERROR;
 
     GameSessionResult result = save_file_write(session->world,
                                                session->save_path);
@@ -242,36 +262,21 @@ GameSessionResult game_session_make_path(const char *directory,
     bool separator = directory[directory_length - 1] != '/' &&
                      directory[directory_length - 1] != '\\';
     size_t required = directory_length + (separator ? 1u : 0u) +
-                      name_length + 4u + 1u;
+                      name_length + 1u + name_length + 4u + 1u;
     if (required > GAME_SESSION_PATH_CAPACITY)
         return GAME_SESSION_PATH_TOO_LONG;
-    int written = snprintf(path, GAME_SESSION_PATH_CAPACITY, "%s%s%s.mcw",
-                           directory, separator ? "/" : "", name);
+    int written = snprintf(path, GAME_SESSION_PATH_CAPACITY,
+                           "%s%s%s/%s.mcw",
+                           directory, separator ? "/" : "", name, name);
     return written > 0 && written < GAME_SESSION_PATH_CAPACITY ?
            GAME_SESSION_OK : GAME_SESSION_PATH_TOO_LONG;
 }
 
-static bool has_save_extension(const char *name)
+static bool add_save(GameSaveList *list, const char *name)
 {
-    size_t length = strlen(name);
-    if (length < 5) return false;
-    const char *extension = name + length - 4;
-    return extension[0] == '.' &&
-           tolower((unsigned char)extension[1]) == 'm' &&
-           tolower((unsigned char)extension[2]) == 'c' &&
-           tolower((unsigned char)extension[3]) == 'w';
-}
-
-static bool add_save(GameSaveList *list, const char *filename)
-{
-    if (!has_save_extension(filename)) return true;
-    size_t length = strlen(filename) - 4;
-    if (!length || length >= GAME_SESSION_NAME_CAPACITY) return true;
-    char name[GAME_SESSION_NAME_CAPACITY];
-    memcpy(name, filename, length);
-    name[length] = '\0';
     if (!game_session_valid_name(name)) return true;
     if (list->count == GAME_SESSION_MAX_SAVES) return false;
+    size_t length = strlen(name);
     memcpy(list->names[list->count++], name, length + 1);
     return true;
 }
@@ -304,7 +309,7 @@ GameSessionResult game_session_list_saves(const char *directory,
     char pattern[GAME_SESSION_PATH_CAPACITY];
     size_t length = strlen(directory);
     bool separator = directory[length - 1] != '/' && directory[length - 1] != '\\';
-    int written = snprintf(pattern, sizeof(pattern), "%s%s*.mcw",
+    int written = snprintf(pattern, sizeof(pattern), "%s%s*",
                            directory, separator ? "/" : "");
     if (written <= 0 || written >= (int)sizeof(pattern))
         return GAME_SESSION_PATH_TOO_LONG;
@@ -315,8 +320,15 @@ GameSessionResult game_session_list_saves(const char *directory,
                GAME_SESSION_OK : GAME_SESSION_IO_ERROR;
     }
     do {
-        if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-            !add_save(list, data.cFileName)) complete = false;
+        if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            !game_session_valid_name(data.cFileName)) continue;
+        char path[GAME_SESSION_PATH_CAPACITY];
+        if (game_session_make_path(directory, data.cFileName, path) !=
+            GAME_SESSION_OK) continue;
+        DWORD attributes = GetFileAttributesA(path);
+        if (attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (!add_save(list, data.cFileName)) complete = false;
     } while (FindNextFileA(search, &data));
     DWORD error = GetLastError();
     FindClose(search);
@@ -324,17 +336,26 @@ GameSessionResult game_session_list_saves(const char *directory,
 #else
     DIR *stream = opendir(directory);
     if (!stream) return GAME_SESSION_IO_ERROR;
-    errno = 0;
     struct dirent *entry;
-    while ((entry = readdir(stream)) != NULL) {
-        char path[GAME_SESSION_PATH_CAPACITY];
+    for (;;) {
+        errno = 0;
+        entry = readdir(stream);
+        if (!entry) break;
+        if (!game_session_valid_name(entry->d_name)) continue;
+        char directory_path[GAME_SESSION_PATH_CAPACITY];
         size_t directory_length = strlen(directory);
         bool separator = directory[directory_length - 1] != '/';
-        int written = snprintf(path, sizeof(path), "%s%s%s", directory,
+        int written = snprintf(directory_path, sizeof(directory_path),
+                               "%s%s%s", directory,
                                separator ? "/" : "", entry->d_name);
-        if (written <= 0 || written >= (int)sizeof(path)) continue;
+        if (written <= 0 || written >= (int)sizeof(directory_path)) continue;
         struct stat status;
-        if (stat(path, &status) != 0 || !S_ISREG(status.st_mode)) continue;
+        if (stat(directory_path, &status) != 0 || !S_ISDIR(status.st_mode))
+            continue;
+        char save_path[GAME_SESSION_PATH_CAPACITY];
+        if (game_session_make_path(directory, entry->d_name, save_path) !=
+            GAME_SESSION_OK) continue;
+        if (stat(save_path, &status) != 0 || !S_ISREG(status.st_mode)) continue;
         if (!add_save(list, entry->d_name)) complete = false;
     }
     int read_error = errno;
