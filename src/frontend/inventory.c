@@ -48,7 +48,8 @@ static const BlockTexture block_textures[] = {
     {BLOCK_TARGET, "res/textures/item/target_block.png"},
     {BLOCK_HOPPER, "res/textures/item/hopper.png"},
     {BLOCK_DROPPER, "res/textures/item/dropper.png"},
-    {BLOCK_REDSTONE_LAMP, "res/textures/item/redstone_lamp.png"}
+    {BLOCK_REDSTONE_LAMP, "res/textures/item/redstone_lamp.png"},
+    {BLOCK_LEVER, "res/textures/block/lever0.png"}
 };
 
 static InventoryLayout inventory_layout(void)

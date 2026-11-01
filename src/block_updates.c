@@ -84,6 +84,10 @@ static void removed(World *w, StateChange c, bool changed_type)
     case BLOCK_REDSTONE_TORCH:
         if (!moving) sim_update_neighbors_around(w, c.pos);
         break;
+    case BLOCK_LEVER:
+        if (changed_type && !moving && c.previous.data.lever.powered)
+            lever_update_neighbors(w, c.pos, c.previous);
+        break;
     case BLOCK_REDSTONE_REPEATER:
     case BLOCK_REDSTONE_COMPARATOR:
         if (changed_type && !moving)
@@ -165,6 +169,10 @@ static void placed(World *w, StateChange c, bool changed_type)
                     (Direction)state.data.observer.facing);
         }
         break;
+    case BLOCK_LEVER:
+        if (changed_type && c.current.data.lever.powered)
+            lever_update_neighbors(w, c.pos, c.current);
+        break;
     default: break;
     }
 }
@@ -183,6 +191,10 @@ static BlockState update_shape(World *w, BlockPos pos, BlockState state,
     } else if (state.id == BLOCK_REDSTONE_TORCH) {
         Direction support = (Direction)state.data.torch.support_dir;
         if (toward == support && !torch_supported(w, pos, support))
+            state = block_default(BLOCK_AIR);
+    } else if (state.id == BLOCK_LEVER) {
+        Direction support = (Direction)state.data.lever.support_dir;
+        if (toward == support && !lever_supported(w, pos, support))
             state = block_default(BLOCK_AIR);
     } else if (block_is_piston_head((BlockId)state.id)) {
         Direction facing = (Direction)state.data.piston.facing;

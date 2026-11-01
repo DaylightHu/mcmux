@@ -39,10 +39,13 @@ enum {
     STATE_LAMP_FIRST = STATE_DROPPER_FIRST + STATE_DROPPER_COUNT,
     STATE_LAMP_COUNT = 2,
     STATE_MOVING_PISTON_FIRST = STATE_LAMP_FIRST + STATE_LAMP_COUNT,
-    STATE_MOVING_PISTON_COUNT = DIR_COUNT * 2
+    STATE_MOVING_PISTON_COUNT = DIR_COUNT * 2,
+    STATE_LEVER_FIRST =
+        STATE_MOVING_PISTON_FIRST + STATE_MOVING_PISTON_COUNT,
+    STATE_LEVER_COUNT = 3 * 4 * 2
 };
 
-_Static_assert(STATE_MOVING_PISTON_FIRST + STATE_MOVING_PISTON_COUNT <=
+_Static_assert(STATE_LEVER_FIRST + STATE_LEVER_COUNT <=
                STATE_ID_LIMIT,
                "block states must fit the palette state id");
 
@@ -187,6 +190,20 @@ bool state_encode(BlockState s, StateId *id)
     }
     if (s.id == BLOCK_REDSTONE_LAMP) {
         *id = (StateId)(STATE_LAMP_FIRST + (s.data.lamp.lit ? 1u : 0u));
+        return true;
+    }
+    if (s.id == BLOCK_LEVER) {
+        unsigned facing, face;
+        if (!horizontal_index(s.data.lever.facing, &facing)) return false;
+        Direction support = (Direction)s.data.lever.support_dir;
+        if (support == DIR_DOWN) face = 0;
+        else if (direction_horizontal(support) &&
+                 support == direction_opposite((Direction)s.data.lever.facing))
+            face = 1;
+        else if (support == DIR_UP) face = 2;
+        else return false;
+        *id = (StateId)(STATE_LEVER_FIRST + facing + face*4u +
+              (s.data.lever.powered ? 12u : 0u));
         return true;
     }
     if (s.id == BLOCK_MOVING_PISTON) {
@@ -350,6 +367,20 @@ bool state_decode(StateId id, BlockState *s)
         *s = block_default(BLOCK_MOVING_PISTON);
         s->data.moving_piston.facing = (uint8_t)(value % DIR_COUNT);
         s->data.moving_piston.sticky = value >= DIR_COUNT;
+        return true;
+    }
+    if (id >= STATE_LEVER_FIRST &&
+        id < STATE_LEVER_FIRST + STATE_LEVER_COUNT) {
+        unsigned value = id - STATE_LEVER_FIRST;
+        unsigned orientation = value % 12u;
+        unsigned face = orientation / 4u;
+        Direction facing = horizontal_face(orientation % 4u);
+        *s = block_default(BLOCK_LEVER);
+        s->data.lever.facing = (uint8_t)facing;
+        s->data.lever.support_dir = (uint8_t)(
+            face == 0 ? DIR_DOWN :
+            face == 1 ? direction_opposite(facing) : DIR_UP);
+        s->data.lever.powered = value >= 12u;
         return true;
     }
     if (id < 16 || id > 8207) return false;

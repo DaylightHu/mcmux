@@ -78,12 +78,22 @@ BlockState world_get(const World *world, BlockPos pos); /* Outside vertical/coor
 /* Returns false unless pos contains an active moving-piston placeholder. */
 bool world_get_piston_motion(const World *world, BlockPos pos,
                              WorldPistonMotion *motion);
-/* direction is the supporting block relative to a torch; the output direction
- * for a repeater/comparator/observer; the push direction for a piston; the lid
- * direction for a barrel; the outlet for a dropper or hopper (hopper up maps to down);
- * and the horizontal orientation for a rail (opposite directions share a shape). */
+/* direction is the supporting block relative to a torch or lever; the output
+ * direction for a repeater/comparator/observer; the push direction for a
+ * piston; the lid direction for a barrel; the outlet for a dropper or hopper
+ * (hopper up maps to down); and the horizontal orientation for a rail
+ * (opposite directions share a shape). A floor/ceiling lever placed here uses
+ * north as its horizontal facing. */
 void world_place(World *world, BlockPos pos, BlockId id, Direction support_dir);
+/* Place a lever with its complete vanilla attachment state. facing must be
+ * horizontal and controls floor/ceiling orientation; wall facing is derived
+ * from support_dir. The lever starts unpowered. */
+void world_place_lever(World *world, BlockPos pos, Direction support_dir,
+                       Direction facing);
 void world_remove(World *world, BlockPos pos);
+/* Set an existing lever to an absolute input state and notify its output
+ * neighbors synchronously. */
+void world_set_lever_powered(World *world, BlockPos pos, bool powered);
 RsResult world_toggle_wire_dot(World *world, BlockPos pos);
 RsResult world_cycle_repeater_delay(World *world, BlockPos pos);
 RsResult world_toggle_comparator_mode(World *world, BlockPos pos);

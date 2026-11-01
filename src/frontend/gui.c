@@ -836,7 +836,10 @@ static void apply_edit(GuiApp *app, VoxelHit hit, BlockId selected, bool place,
                      "%s must be placed on a top face", block_name(selected));
             return;
         }
-        world_place(world, target, selected, plan.placement);
+        if (selected == BLOCK_LEVER)
+            world_place_lever(world, target, plan.placement, facing);
+        else
+            world_place(world, target, selected, plan.placement);
     } else {
         world_remove(world, hit.pos);
     }
@@ -1070,6 +1073,20 @@ static VoxelHit update_world(GuiApp *app)
                     result = game_session_flush(app->session);
                 snprintf(app->message, sizeof(app->message), "Toggle dot: %s",
                          rs_result_name(result));
+            } else if (hit.hit && !shift && target == BLOCK_LEVER) {
+                BlockState state = world_get(world, hit.pos);
+                uint64_t before_revision = world_revision(world);
+                world_set_lever_powered(world, hit.pos,
+                                        !state.data.lever.powered);
+                RsResult result = world_result(world);
+                if (result == RS_OK &&
+                    world_revision(world) == before_revision)
+                    result = RS_UNCHANGED;
+                world_clear_error(world);
+                if (result == RS_OK || result == RS_UNCHANGED)
+                    result = game_session_flush(app->session);
+                snprintf(app->message, sizeof(app->message),
+                         "Toggle lever: %s", rs_result_name(result));
             } else if (hit.hit && !shift &&
                        target == BLOCK_REDSTONE_REPEATER) {
                 RsResult result = world_cycle_repeater_delay(world, hit.pos);

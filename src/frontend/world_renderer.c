@@ -12,7 +12,7 @@
 enum { REGION_SIZE = 16 };
 enum {
     SOLIDS, GLASS, DUST, REPEATERS, COMPARATORS,
-    POWERED_RAILS, ACTIVATOR_RAILS, TORCHES, PARTS
+    POWERED_RAILS, ACTIVATOR_RAILS, TORCHES, LEVERS, PARTS
 };
 
 typedef struct {
@@ -67,6 +67,7 @@ static int part_for(unsigned id)
     case BLOCK_POWERED_RAIL: return POWERED_RAILS;
     case BLOCK_ACTIVATOR_RAIL: return ACTIVATOR_RAILS;
     case BLOCK_REDSTONE_TORCH: return TORCHES;
+    case BLOCK_LEVER: return LEVERS;
     default: return -1;
     }
 }
@@ -140,6 +141,11 @@ static void on_change(void *context, BlockPos p, BlockState before, BlockState a
     } else if (old_part == new_part && new_part == TORCHES) {
         geometry = before.data.torch.support_dir != after.data.torch.support_dir;
         visual = geometry || before.data.torch.lit != after.data.torch.lit;
+    } else if (old_part == new_part && new_part == LEVERS) {
+        geometry = before.data.lever.support_dir != after.data.lever.support_dir ||
+                   before.data.lever.facing != after.data.lever.facing;
+        visual = geometry ||
+                 before.data.lever.powered != after.data.lever.powered;
     } else if (old_part == new_part && new_part == REPEATERS) {
         visual = before.data.repeater.facing != after.data.repeater.facing ||
                  before.data.repeater.delay != after.data.repeater.delay ||
@@ -254,6 +260,7 @@ static bool rebuild_part(WorldRenderer *r, size_t region_id, int kind)
             quads += REDSTONE_GATE_GEOMETRY_QUADS;
         else if (kind == POWERED_RAILS || kind == ACTIVATOR_RAILS)
             quads += 1;
+        else if (kind == LEVERS) quads += 1;
         else quads += 6;
     }
 
@@ -390,7 +397,7 @@ WorldRenderer *world_renderer_create(World *world, const BlockRenderer *blocks)
         blocks->atlas, blocks->glass_texture, blocks->wire_atlas,
         blocks->repeater_atlas, blocks->comparator_atlas,
         blocks->powered_rail_atlas, blocks->activator_rail_atlas,
-        blocks->torch_atlas
+        blocks->torch_atlas, blocks->lever_atlas
     };
     for (int kind = 0; kind < PARTS; ++kind) {
         r->materials[kind] = LoadMaterialDefault();

@@ -595,7 +595,8 @@ void world_remove_internal(World *w, BlockPos p)
 {
     (void)world_set_block(w, p, block_default(BLOCK_AIR), 3);
 }
-static RsResult place_block(World *w, BlockPos p, BlockId id, Direction support)
+static RsResult place_block(World *w, BlockPos p, BlockId id, Direction support,
+                            Direction lever_facing)
 {
     if (!w) return RS_INVALID_ARGUMENT;
     if (!world_in_bounds(w, p)) return RS_OUT_OF_BOUNDS;
@@ -608,7 +609,14 @@ static RsResult place_block(World *w, BlockPos p, BlockId id, Direction support)
         if (support == DIR_UP) support = DIR_DOWN;
     }
     if (id == BLOCK_REDSTONE_WIRE && !wire_supported(w, p)) return RS_UNSUPPORTED;
-    if (id == BLOCK_REDSTONE_TORCH) {
+    if (id == BLOCK_LEVER) {
+        if ((unsigned)support >= DIR_COUNT ||
+            !direction_horizontal(lever_facing))
+            return RS_INVALID_ARGUMENT;
+        if (direction_horizontal(support))
+            lever_facing = direction_opposite(support);
+        if (!lever_supported(w, p, support)) return RS_UNSUPPORTED;
+    } else if (id == BLOCK_REDSTONE_TORCH) {
         if (support != DIR_DOWN && !direction_horizontal(support)) return RS_INVALID_ARGUMENT;
         if (!torch_supported(w, p, support)) return RS_UNSUPPORTED;
     } else if (id == BLOCK_REDSTONE_REPEATER ||
@@ -643,7 +651,10 @@ static RsResult place_block(World *w, BlockPos p, BlockId id, Direction support)
          previous.data.piston.facing == support) &&
         (id != BLOCK_BARREL || previous.data.barrel.facing == support) &&
         (id != BLOCK_HOPPER || previous.data.hopper.facing == support) &&
-        (id != BLOCK_DROPPER || previous.data.dropper.facing == support))
+        (id != BLOCK_DROPPER || previous.data.dropper.facing == support) &&
+        (id != BLOCK_LEVER ||
+         (previous.data.lever.support_dir == support &&
+          previous.data.lever.facing == lever_facing)))
         return RS_UNCHANGED;
     if (id == BLOCK_REDSTONE_TORCH && sim_prepare_torch(w) != RS_OK) return RS_OUT_OF_MEMORY;
     BlockState state = block_default(id);
@@ -662,6 +673,10 @@ static RsResult place_block(World *w, BlockPos p, BlockId id, Direction support)
         state.data.hopper.facing = (uint8_t)support;
     if (id == BLOCK_DROPPER)
         state.data.dropper.facing = (uint8_t)support;
+    if (id == BLOCK_LEVER) {
+        state.data.lever.support_dir = (uint8_t)support;
+        state.data.lever.facing = (uint8_t)lever_facing;
+    }
     if (id == BLOCK_REDSTONE_LAMP)
         state.data.lamp.lit = power_received(w, p, SIGNAL_ALL) > 0;
     if (id == BLOCK_NOTE_BLOCK)
@@ -690,8 +705,16 @@ static RsResult place_block(World *w, BlockPos p, BlockId id, Direction support)
 void world_place(World *w, BlockPos p, BlockId id, Direction support)
 {
     if (!world_action_ready(w, "world_place", &p)) return;
-    RsResult result = place_block(w, p, id, support);
+    RsResult result = place_block(w, p, id, support, DIR_NORTH);
     world_record_error(w, result, "world_place", &p, rs_result_name(result));
+}
+void world_place_lever(World *w, BlockPos p, Direction support,
+                       Direction facing)
+{
+    if (!world_action_ready(w, "world_place_lever", &p)) return;
+    RsResult result = place_block(w, p, BLOCK_LEVER, support, facing);
+    world_record_error(w, result, "world_place_lever", &p,
+                       rs_result_name(result));
 }
 static RsResult remove_block(World *w, BlockPos p)
 {
@@ -724,6 +747,25 @@ void world_remove(World *w, BlockPos p)
     if (!world_action_ready(w, "world_remove", &p)) return;
     RsResult result = remove_block(w, p);
     world_record_error(w, result, "world_remove", &p, rs_result_name(result));
+}
+static RsResult set_lever_powered(World *w, BlockPos p, bool powered)
+{
+    if (!w) return RS_INVALID_ARGUMENT;
+    if (!world_in_bounds(w, p)) return RS_OUT_OF_BOUNDS;
+    BlockState state = world_get(w, p);
+    if (state.id != BLOCK_LEVER) return RS_INVALID_ARGUMENT;
+    if (state.data.lever.powered == powered) return RS_UNCHANGED;
+    state.data.lever.powered = powered;
+    if (!world_set_block(w, p, state, 3)) return w->sim->error;
+    lever_update_neighbors(w, p, state);
+    return w->sim->error;
+}
+void world_set_lever_powered(World *w, BlockPos p, bool powered)
+{
+    if (!world_action_ready(w, "world_set_lever_powered", &p)) return;
+    RsResult result = set_lever_powered(w, p, powered);
+    world_record_error(w, result, "world_set_lever_powered", &p,
+                       rs_result_name(result));
 }
 RsResult world_toggle_wire_dot(World *w, BlockPos p)
 {

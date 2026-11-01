@@ -61,6 +61,7 @@ enum { RAIL_STATES = 2 };
 static const float wire_offset = 0.002f;
 static const float redstone_gate_height = 2.0f/16.0f;
 static const float rail_offset = 0.003f;
+static const float lever_offset = 0.002f;
 static const Direction wire_directions[] = {
     DIR_EAST, DIR_WEST, DIR_SOUTH, DIR_NORTH
 };
@@ -431,8 +432,8 @@ cleanup:
     return atlas;
 }
 
-static Image create_rail_atlas(const char *unpowered_path,
-                               const char *powered_path)
+static Image create_two_state_atlas(const char *unpowered_path,
+                                    const char *powered_path)
 {
     const char *const paths[RAIL_STATES] = {
         unpowered_path, powered_path
@@ -545,7 +546,7 @@ bool block_renderer_init(BlockRenderer *renderer)
     SetTextureFilter(renderer->comparator_atlas, TEXTURE_FILTER_POINT);
     SetTextureWrap(renderer->comparator_atlas, TEXTURE_WRAP_CLAMP);
 
-    Image powered_rail_atlas = create_rail_atlas(
+    Image powered_rail_atlas = create_two_state_atlas(
         "res/textures/block/powered_rail0.png",
         "res/textures/block/powered_rail1.png");
     if (powered_rail_atlas.data) {
@@ -560,7 +561,7 @@ bool block_renderer_init(BlockRenderer *renderer)
     SetTextureFilter(renderer->powered_rail_atlas, TEXTURE_FILTER_POINT);
     SetTextureWrap(renderer->powered_rail_atlas, TEXTURE_WRAP_CLAMP);
 
-    Image activator_rail_atlas = create_rail_atlas(
+    Image activator_rail_atlas = create_two_state_atlas(
         "res/textures/block/activator_rail0.png",
         "res/textures/block/activator_rail1.png");
     if (activator_rail_atlas.data) {
@@ -574,6 +575,21 @@ bool block_renderer_init(BlockRenderer *renderer)
     }
     SetTextureFilter(renderer->activator_rail_atlas, TEXTURE_FILTER_POINT);
     SetTextureWrap(renderer->activator_rail_atlas, TEXTURE_WRAP_CLAMP);
+
+    Image lever_atlas = create_two_state_atlas(
+        "res/textures/block/lever0.png",
+        "res/textures/block/lever1.png");
+    if (lever_atlas.data) {
+        renderer->lever_atlas = LoadTextureFromImage(lever_atlas);
+        UnloadImage(lever_atlas);
+    }
+    if (!renderer->lever_atlas.id) {
+        TraceLog(LOG_ERROR, "BLOCK TEXTURE: Cannot create the lever atlas");
+        block_renderer_unload(renderer);
+        return false;
+    }
+    SetTextureFilter(renderer->lever_atlas, TEXTURE_FILTER_POINT);
+    SetTextureWrap(renderer->lever_atlas, TEXTURE_WRAP_CLAMP);
 
     renderer->cutout_shader = LoadShaderFromMemory(NULL, cutout_fragment_shader);
     if (renderer->cutout_shader.id == rlGetShaderIdDefault()) {
@@ -593,6 +609,7 @@ void block_renderer_unload(BlockRenderer *renderer)
 {
     if (!renderer) return;
     if (renderer->cutout_shader.id) UnloadShader(renderer->cutout_shader);
+    if (renderer->lever_atlas.id) UnloadTexture(renderer->lever_atlas);
     if (renderer->activator_rail_atlas.id)
         UnloadTexture(renderer->activator_rail_atlas);
     if (renderer->powered_rail_atlas.id)
@@ -1354,6 +1371,9 @@ int block_renderer_build_uv(const BlockRenderer *renderer, BlockState state,
             if (face == 5) source = (Rectangle){14,28,4,4};
             torch_uv(renderer->torch_atlas, lit, source, uv[count++]);
         }
+    } else if (state.id == BLOCK_LEVER) {
+        solid_tile_uv(renderer->lever_atlas,
+                      state.data.lever.powered ? 1 : 0, 0, uv[count++]);
     } else if (state.id == BLOCK_REDSTONE_REPEATER) {
         repeater_uv(renderer->repeater_atlas, state, uv);
         count = REDSTONE_GATE_GEOMETRY_QUADS;
@@ -1427,6 +1447,45 @@ static void piston_base_bounds(BlockState state, Vector3 *minimum,
     case DIR_SOUTH: maximum->z =  0.25f; break;
     case DIR_NORTH: minimum->z = -0.25f; break;
     default: break;
+    }
+}
+
+static Vector3 direction_vector(Direction direction)
+{
+    BlockPos offset = block_offset((BlockPos){0}, direction);
+    return (Vector3){(float)offset.x, (float)offset.y, (float)offset.z};
+}
+
+static void lever_geometry(BlockState state, Vector3 center,
+                           Vector3 vertices[4])
+{
+    Direction support = (Direction)state.data.lever.support_dir;
+    Direction facing = (Direction)state.data.lever.facing;
+    if ((unsigned)support >= DIR_COUNT) support = DIR_DOWN;
+    if (!direction_horizontal(facing)) facing = DIR_NORTH;
+    Vector3 toward_support = direction_vector(support);
+    Vector3 outward = {-toward_support.x, -toward_support.y,
+                       -toward_support.z};
+    Vector3 up = direction_horizontal(support) ?
+                 (Vector3){0, 1, 0} : direction_vector(facing);
+    Vector3 right = {
+        up.y*outward.z - up.z*outward.y,
+        up.z*outward.x - up.x*outward.z,
+        up.x*outward.y - up.y*outward.x
+    };
+    Vector3 plane = {
+        center.x + toward_support.x*(0.5f - lever_offset),
+        center.y + toward_support.y*(0.5f - lever_offset),
+        center.z + toward_support.z*(0.5f - lever_offset)
+    };
+    static const float horizontal[] = {-0.5f, 0.5f, 0.5f, -0.5f};
+    static const float vertical[] = {-0.5f, -0.5f, 0.5f, 0.5f};
+    for (int vertex = 0; vertex < 4; ++vertex) {
+        vertices[vertex] = (Vector3){
+            plane.x + right.x*horizontal[vertex] + up.x*vertical[vertex],
+            plane.y + right.y*horizontal[vertex] + up.y*vertical[vertex],
+            plane.z + right.z*horizontal[vertex] + up.z*vertical[vertex]
+        };
     }
 }
 
@@ -1554,6 +1613,8 @@ void block_renderer_build_geometry(const BlockRenderer *renderer, BlockState sta
                 Vector3 p = torch_rotate(transform, torch_faces[face].vertices[vertex]);
                 geometry->vertices[face][vertex] = (Vector3){transform.origin.x+p.x,transform.origin.y+p.y,transform.origin.z+p.z};
             }
+    } else if (state.id == BLOCK_LEVER) {
+        lever_geometry(state, center, geometry->vertices[0]);
     } else if (state.id == BLOCK_REDSTONE_REPEATER) {
         redstone_gate_geometry(center, geometry->vertices);
     } else if (state.id == BLOCK_REDSTONE_COMPARATOR) {

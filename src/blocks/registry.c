@@ -39,6 +39,7 @@ const BlockDef *block_definition(BlockId id)
         [BLOCK_HOPPER] = &rs_hopper_def,
         [BLOCK_DROPPER] = &rs_dropper_def,
         [BLOCK_REDSTONE_LAMP] = &rs_lamp_def,
+        [BLOCK_LEVER] = &rs_lever_def,
         [BLOCK_PISTON_HEAD] = &rs_piston_head_def,
         [BLOCK_STICKY_PISTON_HEAD] = &rs_sticky_piston_head_def,
         [BLOCK_MOVING_PISTON] = &rs_moving_piston_def
@@ -79,6 +80,9 @@ BlockState block_default(BlockId id)
         state.data.hopper.enabled = true;
     } else if (id == BLOCK_DROPPER) {
         state.data.dropper.facing = DIR_NORTH;
+    } else if (id == BLOCK_LEVER) {
+        state.data.lever.support_dir = DIR_DOWN;
+        state.data.lever.facing = DIR_NORTH;
     }
     return state;
 }
