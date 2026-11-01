@@ -62,12 +62,14 @@ PlacementTarget flexible_placement_target(VoxelHit hit, BlockId block,
     bool six_axis = block == BLOCK_OBSERVER || block == BLOCK_BARREL ||
         block == BLOCK_DROPPER || block_is_piston_base(block);
     target.directional = horizontal_block || six_axis ||
-        block == BLOCK_REDSTONE_TORCH || block == BLOCK_HOPPER;
+        block == BLOCK_REDSTONE_TORCH || block == BLOCK_LEVER ||
+        block == BLOCK_HOPPER;
     target.placement = six_axis ? direction_opposite(looking) :
         horizontal_block ? horizontal : direction_opposite(hit.face);
     target.valid = true;
     if (rotate && target.directional) {
-        target.placement = block == BLOCK_REDSTONE_TORCH ?
+        target.placement = (block == BLOCK_REDSTONE_TORCH ||
+                            block == BLOCK_LEVER) ?
             direction_opposite(target.direction) : target.direction;
         if ((horizontal_block && !direction_horizontal(target.placement)) ||
             (block == BLOCK_HOPPER && target.placement == DIR_UP) ||

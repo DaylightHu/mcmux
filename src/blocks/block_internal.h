@@ -36,7 +36,7 @@ extern const BlockDef rs_iron_def, rs_redstone_block_def, rs_wire_def, rs_torch_
                       rs_moving_piston_def,
                       rs_barrel_def, rs_slime_def, rs_note_block_def,
                       rs_honey_def, rs_target_def, rs_hopper_def, rs_dropper_def,
-                      rs_lamp_def;
+                      rs_lamp_def, rs_lever_def;
 uint8_t power_signal(const World *, BlockPos, Direction, SignalMode);
 uint8_t power_direct(const World *, BlockPos, Direction, SignalMode);
 uint8_t power_received(const World *, BlockPos, SignalMode);
@@ -52,6 +52,8 @@ bool block_has_analog_output(const World *, BlockPos);
 uint8_t block_analog_output(const World *, BlockPos);
 bool wire_supported(const World *, BlockPos);
 bool torch_supported(const World *, BlockPos, Direction);
+bool lever_supported(const World *, BlockPos, Direction);
+void lever_update_neighbors(World *, BlockPos, BlockState);
 bool repeater_supported(const World *, BlockPos);
 bool comparator_supported(const World *, BlockPos);
 bool rail_supported(const World *, BlockPos);

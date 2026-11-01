@@ -43,6 +43,27 @@ void block_outline_shape(BlockState state, BlockShape *shape)
     case BLOCK_REDSTONE_COMPARATOR:
         box(shape, 0, 0, 0, 16, 2, 16);
         return;
+    case BLOCK_LEVER: {
+        Direction support = (Direction)state.data.lever.support_dir;
+        Direction facing = (Direction)state.data.lever.facing;
+        bool x_axis = facing == DIR_EAST || facing == DIR_WEST;
+        if (support == DIR_DOWN) {
+            if (x_axis) box(shape, 4,0,5, 12,6,11);
+            else box(shape, 5,0,4, 11,6,12);
+        } else if (support == DIR_UP) {
+            if (x_axis) box(shape, 4,10,5, 12,16,11);
+            else box(shape, 5,10,4, 11,16,12);
+        } else if (support == DIR_EAST) {
+            box(shape, 10,4,5, 16,12,11);
+        } else if (support == DIR_WEST) {
+            box(shape, 0,4,5, 6,12,11);
+        } else if (support == DIR_SOUTH) {
+            box(shape, 5,4,10, 11,12,16);
+        } else {
+            box(shape, 5,4,0, 11,12,6);
+        }
+        return;
+    }
     case BLOCK_POWERED_RAIL:
     case BLOCK_ACTIVATOR_RAIL:
         box(shape, 0, 0, 0, 16, state.data.rail.ascending ? 8 : 2, 16);

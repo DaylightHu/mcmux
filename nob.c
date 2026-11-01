@@ -63,6 +63,7 @@ static const char *common_sources[] = {
     "src/blocks/hopper.c",
     "src/blocks/dropper.c",
     "src/blocks/lamp.c",
+    "src/blocks/lever.c",
 };
 
 static const char *gui_sources[] = {

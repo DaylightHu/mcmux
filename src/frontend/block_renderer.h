@@ -13,6 +13,7 @@ typedef struct{
     Texture2D comparator_atlas;
     Texture2D powered_rail_atlas;
     Texture2D activator_rail_atlas;
+    Texture2D lever_atlas;
     Shader cutout_shader;
 } BlockRenderer;
 

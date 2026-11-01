@@ -26,7 +26,8 @@ static const BlockId disk_types[] = {
     BLOCK_REDSTONE_COMPARATOR, BLOCK_POWERED_RAIL, BLOCK_ACTIVATOR_RAIL,
     BLOCK_OBSERVER, BLOCK_PISTON, BLOCK_STICKY_PISTON, BLOCK_BARREL,
     BLOCK_SLIME, BLOCK_NOTE_BLOCK, BLOCK_HONEY, BLOCK_TARGET, BLOCK_HOPPER,
-    BLOCK_DROPPER, BLOCK_REDSTONE_LAMP, BLOCK_PISTON_HEAD, BLOCK_STICKY_PISTON_HEAD
+    BLOCK_DROPPER, BLOCK_REDSTONE_LAMP, BLOCK_PISTON_HEAD,
+    BLOCK_STICKY_PISTON_HEAD, BLOCK_LEVER
 };
 typedef struct { uint32_t cell; ContainerStack slots[27]; } StructureContainer;
 struct Structure {
@@ -92,6 +93,9 @@ static bool encode_state(BlockState s, unsigned char out[RECORD_SIZE])
     case BLOCK_DROPPER:
         p[0]=s.data.dropper.facing; p[1]=s.data.dropper.level; p[2]=s.data.dropper.triggered; break;
     case BLOCK_REDSTONE_LAMP: p[0]=s.data.lamp.lit; break;
+    case BLOCK_LEVER:
+        p[0]=s.data.lever.support_dir; p[1]=s.data.lever.facing;
+        p[2]=s.data.lever.powered; break;
     default: break;
     }
     return true;
@@ -131,6 +135,9 @@ static bool decode_state(const unsigned char in[RECORD_SIZE], BlockState *s)
     case BLOCK_DROPPER:
         s->data.dropper.facing=p[0]; s->data.dropper.level=p[1]; s->data.dropper.triggered=p[2]!=0; break;
     case BLOCK_REDSTONE_LAMP: s->data.lamp.lit=p[0]!=0; break;
+    case BLOCK_LEVER:
+        s->data.lever.support_dir=p[0]; s->data.lever.facing=p[1];
+        s->data.lever.powered=p[2]!=0; break;
     default: break;
     }
     unsigned char canonical[RECORD_SIZE];

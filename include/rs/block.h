@@ -11,7 +11,7 @@ typedef enum {
     BLOCK_POWERED_RAIL, BLOCK_ACTIVATOR_RAIL, BLOCK_OBSERVER,
     BLOCK_PISTON, BLOCK_STICKY_PISTON, BLOCK_BARREL, BLOCK_SLIME,
     BLOCK_NOTE_BLOCK, BLOCK_HONEY, BLOCK_TARGET, BLOCK_HOPPER, BLOCK_DROPPER,
-    BLOCK_REDSTONE_LAMP,
+    BLOCK_REDSTONE_LAMP, BLOCK_LEVER,
     BLOCK_INTERNAL_FIRST,
     BLOCK_PISTON_HEAD = BLOCK_INTERNAL_FIRST,
     BLOCK_STICKY_PISTON_HEAD,
@@ -98,6 +98,11 @@ typedef struct {
         struct {
             bool lit;
         } lamp;
+        struct {
+            uint8_t support_dir;    /* From lever toward its supporting block. */
+            uint8_t facing;         /* Vanilla horizontal FACING property. */
+            bool powered;
+        } lever;
     } data;
 } BlockState;
 

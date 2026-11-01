@@ -24,7 +24,11 @@ void writeback_mcs(World *world, const char *mcs_path,
 
 /* Place a block & Remove a block */
 // void world_place(World *world, BlockPos pos, BlockId id, Direction support_dir);
+// void world_place_lever(World *world, BlockPos pos, Direction support_dir, Direction facing);
 // void world_remove(World *world, BlockPos pos);
+
+/* Drive an existing lever to a deterministic input state. */
+// void world_set_lever_powered(World *world, BlockPos pos, bool powered);
 
 /* Read a block and its state. Out-of-bounds reads return air; check bounds
  * separately when the distinction matters. */
