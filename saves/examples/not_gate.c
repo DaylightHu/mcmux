@@ -1,23 +1,38 @@
+/*******************************************************************************************
+*
+*   mcmux example - NOT gate
+*
+*   Powers the input lever and verifies that the output iron block remains at
+*   power 15 for 1 game tick, then changes to 0 exactly at game tick 2.
+*
+*   World:     saves/examples/examples.mcw
+*   Structure: saves/examples/not_gate.mcs
+*
+*   Example created by DaylightHu (@DaylightHu)
+*
+********************************************************************************************/
 #include "mcmux.h"
 
 static const BlockPos INPUT = {41, 4, 9};
 static const BlockPos OUTPUT = {41, 6, 12};
 static const BlockPos ANCHOR = {41, 4, 9};
 
+enum { PROPAGATION_DELAY = 2 };
+
 typedef struct {
     uint64_t input_tick;
-} NotCheckContext;
+} TransitionCheck;
 
 static bool valid(const World *world, void *context)
 {
-    const NotCheckContext *check = context;
+    const TransitionCheck *check = context;
 
     BlockState input = world_get(world, INPUT);
     BlockState output = world_get(world, OUTPUT);
     SolidPower output_power = redstone_solid_power(world, OUTPUT);
 
     uint64_t elapsed = world_tick(world) - check->input_tick;
-    uint8_t expected_power = elapsed < 2 ? 15u : 0u;
+    uint8_t expected_power = elapsed < PROPAGATION_DELAY ? 15u : 0u;
 
     return input.id == BLOCK_LEVER &&
            input.data.lever.powered &&
@@ -43,7 +58,7 @@ int main(void)
                  output_power.received == 15u,
                  "NOT output must initially be powered");
 
-    NotCheckContext check = {
+    TransitionCheck check = {
         .input_tick = world_tick(world),
     };
 
@@ -55,7 +70,7 @@ int main(void)
     });
 
     world_set_lever_powered(world, INPUT, true);
-    sim_advance_ticks(world, 2);
+    sim_advance_ticks(world, PROPAGATION_DELAY);
 
     writeback_mcs(world,
                   "saves/examples/not_gate.mcs",
