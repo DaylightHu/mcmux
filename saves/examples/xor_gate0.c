@@ -2,7 +2,7 @@
 *
 *   mcmux example - XOR gate
 *
-*   Drives two lever inputs, advances six game ticks, and verifies that the
+*   Drives two lever inputs, advances 8 game ticks, and verifies that the
 *   output iron block receives power 15 exactly when one input is powered.
 *
 *   World:     saves/examples/examples.mcw
@@ -43,7 +43,7 @@ static bool valid(const World *world, void *unused)
 
 int main(void)
 {
-    World *world = load_mcs("saves/examples/xor_gate.mcs", ANCHOR);
+    World *world = load_mcs("saves/examples/xor_gate0.mcs", ANCHOR);
 
     sim_set_check(world, (SimCheckConfig){
         .check = valid,
@@ -59,7 +59,7 @@ int main(void)
 
     sim_advance_ticks(world, 8);
 
-    writeback_mcs(world, "saves/examples/xor_gate.mcs",
+    writeback_mcs(world, "saves/examples/xor_gate0.mcs",
                   ANCHOR, "saves/examples/examples.mcw");
 
     RsResult result = world_result(world);
