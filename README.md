@@ -64,13 +64,21 @@ mc-nvim's `:` commands operate on editor files and programs.
 | `//stack [COUNT] DIRECTION` | Add repeated copies in a direction. |
 | `//move [DISTANCE] DIRECTION` | Move the selected blocks. |
 | `//undo` / `//redo` | Undo or redo the last selection edit. |
-| `//schem save [-f] NAME [X Y Z]` | Save the selection to `structures/NAME.mcs`; `-f` replaces an existing file. |
+| `//schem save [-f] NAME [X Y Z]` | Save the selection beside the current world's `.mcw`; `-f` replaces an existing file. |
 | `/tick freeze` | Toggle automatic ticking. |
 | `/tick step NUMBER` | Run a fixed number of ticks while frozen. |
 | `/tick noupdate` | Toggle block callbacks and neighbor updates. |
 | `/plot info` | Show the current plot bounds. |
 | `/plot expand DIRECTION [COUNT]` | Expand the plot. |
 | `/plot shrink DIRECTION [COUNT]` | Shrink the plot; confirm if edits would be deleted. |
+
+## World directories
+
+Each world is stored as a self-contained directory under `saves/`. The
+directory and its `.mcw` file use the same world name. Programs and structures
+belonging to that world can be stored beside the world file.
+
+The repository includes an example world at `saves/examples/`.
 
 ## References
 

@@ -7,14 +7,11 @@
 *.app
 
 engine
-/examples/
 /build/
 /third_party/raylib/
 /nob
 /nob.old
 /nob.exe
 /nob.exe.old
-/saves/
-/structures/
 
 /.cache/clangd/

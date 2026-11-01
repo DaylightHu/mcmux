@@ -59,7 +59,9 @@ RsResult game_session_advance(GameSession *session, double elapsed_seconds);
 void game_session_reset_clock(GameSession *session);
 
 /* World names are deliberately portable: ASCII letters, digits, spaces,
- * '-' and '_'. Leading/trailing spaces and path separators are rejected. */
+ * '-' and '_'. Leading/trailing spaces and path separators are rejected.
+ * A world named NAME in directory DIR is stored at DIR/NAME/NAME.mcw; the
+ * world directory may also contain its programs and structures. */
 bool game_session_valid_name(const char *name);
 GameSessionResult game_session_make_path(const char *directory,
                                          const char *name,
