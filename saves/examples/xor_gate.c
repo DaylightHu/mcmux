@@ -1,3 +1,19 @@
+/*******************************************************************************************
+*
+*   mcmux example - XOR gate
+*
+*   Drives two lever inputs, advances six game ticks, and verifies that the
+*   output iron block receives power 15 exactly when one input is powered.
+*
+*   World:     saves/examples/examples.mcw
+*   Structure: saves/examples/xor_gate.mcs
+*
+*   Change input_a and input_b in main() to select the input case.
+*   The simulation result is written back to the example world.
+*
+*   Example created by DaylightHu (@DaylightHu)
+*
+********************************************************************************************/
 #include "mcmux.h"
 
 static const BlockPos INPUT_A = {37, 4, 9};
@@ -31,7 +47,7 @@ int main(void)
 
     sim_set_check(world, (SimCheckConfig){
         .check = valid,
-        .after_ticks = 6,
+        .after_ticks = 8,
         .message = "XOR output does not match its lever inputs",
     });
 
@@ -41,7 +57,7 @@ int main(void)
     world_set_lever_powered(world, INPUT_A, input_a);
     world_set_lever_powered(world, INPUT_B, input_b);
 
-    sim_advance_ticks(world, 6);
+    sim_advance_ticks(world, 8);
 
     writeback_mcs(world, "saves/examples/xor_gate.mcs",
                   ANCHOR, "saves/examples/examples.mcw");

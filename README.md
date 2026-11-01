@@ -72,6 +72,14 @@ mc-nvim's `:` commands operate on editor files and programs.
 | `/plot expand DIRECTION [COUNT]` | Expand the plot. |
 | `/plot shrink DIRECTION [COUNT]` | Shrink the plot; confirm if edits would be deleted. |
 
+## World directories
+
+Each world is stored as a self-contained directory under `saves/`. The
+directory and its `.mcw` file use the same world name. Programs and structures
+belonging to that world can be stored beside the world file.
+
+The repository includes an example world at `saves/examples/`.
+
 ## References
 
 - https://github.com/raysan5/raylib
