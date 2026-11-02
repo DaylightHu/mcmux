@@ -1,5 +1,5 @@
+![Background](./res/gui/title_background.png)
 # mcmux
-
 mcmux is a C redstone sandbox based on Minecraft 1.16.2. The GUI combines a
 world editor, redstone simulation, saved worlds, structure export, and an
 embedded mc-nvim workspace.
