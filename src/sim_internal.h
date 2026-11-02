@@ -51,7 +51,13 @@ typedef struct {
     BlockState previous, current;
     unsigned flags, remaining_shapes;
 } StateChange;
+typedef struct SimExecutorOps SimExecutorOps;
+typedef struct {
+    const SimExecutorOps *ops;
+    void *context;
+} SimExecutor;
 struct Simulator {
+    SimExecutor executor;
     Scheduler scheduler;
     PistonEvents piston_events;
     PistonMotions piston_motions;
@@ -90,9 +96,12 @@ void sim_update_shape_at(World *, BlockPos, Direction toward_source,
                           BlockPos source, unsigned flags, unsigned remaining_shapes);
 void sim_update_neighbor_shapes(World *, BlockPos, unsigned flags, unsigned remaining_shapes);
 BlockState sim_update_from_neighbor_shapes(World *, BlockPos, BlockState);
-void sim_state_changed(World *, StateChange);
+void sim_executor_state_changed(World *, StateChange);
 /* Runtime resources have already been installed for every edited cell. */
-void sim_edit_state_changed(World *, StateChange);
+void sim_executor_edit_state_changed(World *, StateChange);
+/* The reference executor's synchronous state propagation. */
+void sim_reference_state_changed(World *, StateChange);
+void sim_reference_edit_state_changed(World *, StateChange);
 bool block_states_equal(BlockState, BlockState);
 void sim_mark_wire(World *, BlockPos);
 void sim_mark_input(World *, BlockPos);
