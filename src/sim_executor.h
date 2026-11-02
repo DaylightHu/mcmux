@@ -1,7 +1,6 @@
 #ifndef RS_SIM_EXECUTOR_H
 #define RS_SIM_EXECUTOR_H
 
-#include "redstone_shadow.h"
 #include "sim_internal.h"
 
 /*
@@ -35,11 +34,6 @@ struct SimExecutorOps {
 };
 
 void sim_executor_init_reference(World *world);
-/* Replace the current executor with a diagnostic wrapper. Scheduled ticks and
- * every state change still execute through the reference implementation; the
- * plan is only evaluated at flush boundaries and mismatches fail immediately. */
-RsResult sim_executor_init_shadow(World *world, RedstonePlanBounds bounds);
-bool sim_executor_shadow_stats(const World *world, RedstoneShadowStats *stats);
 void sim_executor_destroy(World *world);
 RsResult sim_executor_flush(World *world);
 RsResult sim_executor_scheduled_tick(World *world, ScheduledEvent event);
