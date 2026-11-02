@@ -1,15 +1,20 @@
 #include "sim_executor.h"
 
-static RsResult reference_flush(World *world, void *context)
+struct SimExecutorHost {
+    World *world;
+};
+
+static RsResult reference_flush(SimExecutorHost *host, void *context)
 {
     (void)context;
-    return world->sim->error;
+    return host->world->sim->error;
 }
 
-static RsResult reference_scheduled_tick(World *world, void *context,
+static RsResult reference_scheduled_tick(SimExecutorHost *host, void *context,
                                          ScheduledEvent event)
 {
     (void)context;
+    World *world = host->world;
     Simulator *sim = world->sim;
     BlockState state = world_get(world, event.pos);
     if (scheduler_block_type(state) != event.block) return sim->error;
@@ -29,18 +34,18 @@ static RsResult reference_scheduled_tick(World *world, void *context,
     return sim->error;
 }
 
-static void reference_state_changed(World *world, void *context,
+static void reference_state_changed(SimExecutorHost *host, void *context,
                                     StateChange change)
 {
     (void)context;
-    sim_reference_state_changed(world, change);
+    sim_reference_state_changed(host->world, change);
 }
 
-static void reference_edit_state_changed(World *world, void *context,
+static void reference_edit_state_changed(SimExecutorHost *host, void *context,
                                          StateChange change)
 {
     (void)context;
-    sim_reference_edit_state_changed(world, change);
+    sim_reference_edit_state_changed(host->world, change);
 }
 
 static const SimExecutorOps reference_ops = {
@@ -59,8 +64,10 @@ void sim_executor_destroy(World *world)
 {
     if (!world || !world->sim) return;
     SimExecutor *executor = &world->sim->executor;
-    if (executor->ops && executor->ops->destroy)
-        executor->ops->destroy(world, executor->context);
+    if (executor->ops && executor->ops->destroy) {
+        SimExecutorHost host = {world};
+        executor->ops->destroy(&host, executor->context);
+    }
     *executor = (SimExecutor){0};
 }
 
@@ -70,7 +77,8 @@ RsResult sim_executor_flush(World *world)
     SimExecutor *executor = &world->sim->executor;
     if (!executor->ops || !executor->ops->flush)
         return world->sim->error = RS_INTERNAL_ERROR;
-    return executor->ops->flush(world, executor->context);
+    SimExecutorHost host = {world};
+    return executor->ops->flush(&host, executor->context);
 }
 
 RsResult sim_executor_scheduled_tick(World *world, ScheduledEvent event)
@@ -78,7 +86,8 @@ RsResult sim_executor_scheduled_tick(World *world, ScheduledEvent event)
     SimExecutor *executor = &world->sim->executor;
     if (!executor->ops || !executor->ops->scheduled_tick)
         return world->sim->error = RS_INTERNAL_ERROR;
-    return executor->ops->scheduled_tick(world, executor->context, event);
+    SimExecutorHost host = {world};
+    return executor->ops->scheduled_tick(&host, executor->context, event);
 }
 
 void sim_executor_state_changed(World *world, StateChange change)
@@ -88,7 +97,8 @@ void sim_executor_state_changed(World *world, StateChange change)
         world->sim->error = RS_INTERNAL_ERROR;
         return;
     }
-    executor->ops->state_changed(world, executor->context, change);
+    SimExecutorHost host = {world};
+    executor->ops->state_changed(&host, executor->context, change);
 }
 
 void sim_executor_edit_state_changed(World *world, StateChange change)
@@ -98,5 +108,6 @@ void sim_executor_edit_state_changed(World *world, StateChange change)
         world->sim->error = RS_INTERNAL_ERROR;
         return;
     }
-    executor->ops->edit_state_changed(world, executor->context, change);
+    SimExecutorHost host = {world};
+    executor->ops->edit_state_changed(&host, executor->context, change);
 }

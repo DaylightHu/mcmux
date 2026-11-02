@@ -17,14 +17,20 @@
  * flush must synchronize executor-owned state back to World without advancing
  * time or executing a timed phase.
  */
+/* Borrowed only for the duration of an executor callback. Its definition is
+ * private so a compiled executor receives capabilities explicitly instead of
+ * unrestricted access to World and Simulator internals. */
+typedef struct SimExecutorHost SimExecutorHost;
+
 struct SimExecutorOps {
-    RsResult (*flush)(World *world, void *context);
-    RsResult (*scheduled_tick)(World *world, void *context,
+    RsResult (*flush)(SimExecutorHost *host, void *context);
+    RsResult (*scheduled_tick)(SimExecutorHost *host, void *context,
                                ScheduledEvent event);
-    void (*state_changed)(World *world, void *context, StateChange change);
-    void (*edit_state_changed)(World *world, void *context,
+    void (*state_changed)(SimExecutorHost *host, void *context,
+                          StateChange change);
+    void (*edit_state_changed)(SimExecutorHost *host, void *context,
                                StateChange change);
-    void (*destroy)(World *world, void *context);
+    void (*destroy)(SimExecutorHost *host, void *context);
 };
 
 void sim_executor_init_reference(World *world);
