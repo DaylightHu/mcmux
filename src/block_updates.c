@@ -261,7 +261,7 @@ static void notify_state_change(World *w, StateChange c)
     }
 }
 
-void sim_state_changed(World *w, StateChange c)
+void sim_reference_state_changed(World *w, StateChange c)
 {
     bool changed_type = scheduler_block_type(c.previous) != scheduler_block_type(c.current);
     if (w->sim->updates_suppressed) {
@@ -294,7 +294,7 @@ void sim_state_changed(World *w, StateChange c)
     notify_state_change(w, c);
 }
 
-void sim_edit_state_changed(World *w, StateChange c)
+void sim_reference_edit_state_changed(World *w, StateChange c)
 {
     if (w->sim->updates_suppressed || w->sim->error != RS_OK) return;
     bool changed_type = scheduler_block_type(c.previous) != scheduler_block_type(c.current);

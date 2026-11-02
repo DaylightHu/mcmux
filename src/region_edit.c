@@ -354,7 +354,7 @@ static RsResult apply_plan(RegionEditor *e, EditPlan *plan, size_t *changed)
         EditCell c=plan->cells[i];
         BlockState current=world_get(w,c.pos);
         if (current.id != c.after.id) continue;
-        sim_edit_state_changed(w,(StateChange){c.pos,c.before,current,3,UPDATE_SHAPE_LIMIT});
+        sim_executor_edit_state_changed(w,(StateChange){c.pos,c.before,current,3,UPDATE_SHAPE_LIMIT});
     }
     if (changed) *changed=plan->count;
     return sim_flush(w);

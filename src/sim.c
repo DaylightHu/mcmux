@@ -1,4 +1,5 @@
 #include "sim_internal.h"
+#include "sim_executor.h"
 #include "wire_solver.h"
 #include <limits.h>
 #include <stdio.h>
@@ -10,12 +11,16 @@ bool sim_init_internal(World *w)
     w->sim = calloc(1, sizeof(*w->sim));
     if (!w->sim) return false;
     w->sim->containers.dropper_random = UINT64_C(0x5deece66d); /* Java seed 0. */
-    w->sim->free_torch = SIZE_MAX; scheduler_init(&w->sim->scheduler); return true;
+    w->sim->free_torch = SIZE_MAX;
+    scheduler_init(&w->sim->scheduler);
+    sim_executor_init_reference(w);
+    return true;
 }
 void sim_destroy_internal(World *w)
 {
     Simulator *s = w->sim;
     if (!s) return;
+    sim_executor_destroy(w);
     container_destroy(w);
     free(s->block_entities.items);
     free(s->piston_events.items); posmap_destroy(&s->piston_events.pending);
@@ -361,8 +366,7 @@ static void tick_block_entities(World *w)
 
 RsResult sim_flush(World *w)
 {
-    if (!w) return RS_INVALID_ARGUMENT;
-    return w->sim->error;
+    return sim_executor_flush(w);
 }
 void sim_set_check(World *w, SimCheckConfig config)
 {
@@ -458,20 +462,8 @@ RsResult sim_step(World *w)
     }
     ScheduledEvent event;
     while (scheduler_next_tick(&s->scheduler, &event)) {
-        BlockState state = world_get(w, event.pos);
-        if (scheduler_block_type(state) != event.block) continue;
-        const BlockDef *d = block_definition((BlockId)state.id);
-        if (!d->scheduled_tick) continue;
-        TickAction action = d->scheduled_tick(w, event.pos);
-        ++s->stats.events_processed;
-        if (action.changed)
-            (void)world_set_block(w, event.pos, action.state,
-                state.id == BLOCK_REDSTONE_TORCH ? 3 : 2);
-        if (action.next_delay)
-            sim_schedule(w, event.pos, action.next_delay);
-        if (state.id == BLOCK_OBSERVER)
-            sim_update_output_neighbors(w, event.pos, (Direction)state.data.observer.facing);
-        result = sim_flush(w);
+        result = sim_executor_scheduled_tick(w, event);
+        if (result == RS_OK) result = sim_flush(w);
         if (result != RS_OK) {
             s->handling_tick = false;
             return result;

@@ -473,7 +473,7 @@ RsResult world_shrink_plot(World *w, Direction direction, uint32_t count)
     }
     for (size_t i = 0; i < removed_count && w->sim->error == RS_OK; ++i) {
         BoundaryRemoval r = removals[i];
-        sim_state_changed(w, (StateChange){r.pos,r.before,block_default(BLOCK_AIR),3,UPDATE_SHAPE_LIMIT});
+        sim_executor_state_changed(w, (StateChange){r.pos,r.before,block_default(BLOCK_AIR),3,UPDATE_SHAPE_LIMIT});
         if (r.before.id == BLOCK_MOVING_PISTON) {
             BlockPos behind = block_offset(r.pos, direction_opposite((Direction)r.before.data.moving_piston.facing));
             BlockState base = world_get(w, behind);
@@ -584,7 +584,7 @@ bool world_set_block_depth(World *w, BlockPos p, BlockState state,
     if (!changed) return true;
     if (block_states_equal(previous, state)) return true;
     StateChange change = {p, previous, state, flags, remaining_shapes};
-    sim_state_changed(w, change);
+    sim_executor_state_changed(w, change);
     return w->sim->error == RS_OK;
 }
 bool world_set_block(World *w, BlockPos p, BlockState state, unsigned flags)
