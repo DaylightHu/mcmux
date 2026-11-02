@@ -492,6 +492,71 @@ static bool build_semantic_inputs(const World *world, PlanBuilder *builder)
     return true;
 }
 
+static bool build_consumers(PlanBuilder *builder)
+{
+    RedstonePlan *plan = &builder->plan;
+    if (!plan->node_count) return plan->input_count == 0;
+    if (plan->input_count > SIZE_MAX/sizeof(*plan->consumers) ||
+        plan->node_count > SIZE_MAX/sizeof(size_t)) return false;
+
+    size_t *counts = calloc(plan->node_count, sizeof(*counts));
+    size_t *cursors = malloc(plan->node_count*sizeof(*cursors));
+    if (!counts || !cursors) {
+        free(counts);
+        free(cursors);
+        return false;
+    }
+
+    for (size_t target = 0; target < plan->node_count; ++target) {
+        RedstonePlanNode *node = &plan->nodes[target];
+        for (size_t offset = 0; offset < node->input_count; ++offset) {
+            RedstonePlanInput input =
+                plan->inputs[node->first_input + offset];
+            if (input.source >= plan->node_count ||
+                counts[input.source] == UINT16_MAX) goto fail;
+            ++counts[input.source];
+        }
+    }
+
+    size_t first = 0;
+    for (size_t source = 0; source < plan->node_count; ++source) {
+        RedstonePlanNode *node = &plan->nodes[source];
+        if (first > UINT32_MAX) goto fail;
+        node->first_consumer = (uint32_t)first;
+        node->consumer_count = (uint16_t)counts[source];
+        cursors[source] = first;
+        if (counts[source] > SIZE_MAX - first) goto fail;
+        first += counts[source];
+    }
+    if (first != plan->input_count) goto fail;
+
+    if (first) {
+        plan->consumers = malloc(first*sizeof(*plan->consumers));
+        if (!plan->consumers) goto fail;
+    }
+    for (size_t target = 0; target < plan->node_count; ++target) {
+        RedstonePlanNode *node = &plan->nodes[target];
+        for (size_t offset = 0; offset < node->input_count; ++offset) {
+            RedstonePlanInput input =
+                plan->inputs[node->first_input + offset];
+            plan->consumers[cursors[input.source]++] =
+                (RedstonePlanConsumer){
+                    .target = (RedstoneNodeId)target,
+                    .input_offset = (uint16_t)offset
+                };
+        }
+    }
+    plan->consumer_count = first;
+    free(counts);
+    free(cursors);
+    return true;
+
+fail:
+    free(counts);
+    free(cursors);
+    return false;
+}
+
 void redstone_plan_init(RedstonePlan *plan)
 {
     if (plan) *plan = (RedstonePlan){0};
@@ -503,6 +568,7 @@ void redstone_plan_destroy(RedstonePlan *plan)
     free(plan->nodes);
     free(plan->edges);
     free(plan->inputs);
+    free(plan->consumers);
     posmap_destroy(&plan->positions);
     *plan = (RedstonePlan){0};
 }
@@ -511,9 +577,10 @@ RsResult redstone_plan_build(const World *world, RedstonePlanBounds bounds,
                              RedstonePlan *destination)
 {
     if (!world || !destination || destination->nodes || destination->edges ||
-        destination->inputs ||
+        destination->inputs || destination->consumers ||
         destination->positions.entries || destination->node_count ||
         destination->edge_count || destination->input_count ||
+        destination->consumer_count ||
         !bounds_valid(world, bounds))
         return RS_INVALID_ARGUMENT;
     RsResult result = world_result(world);
@@ -545,6 +612,10 @@ RsResult redstone_plan_build(const World *world, RedstonePlanBounds bounds,
     if (!build_semantic_inputs(world, &builder)) {
         result = world_result(world);
         if (result == RS_OK) result = RS_OUT_OF_MEMORY;
+        goto fail;
+    }
+    if (!build_consumers(&builder)) {
+        result = RS_OUT_OF_MEMORY;
         goto fail;
     }
     for (size_t index = 0; index < builder.plan.node_count; ++index)

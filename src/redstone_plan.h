@@ -58,6 +58,14 @@ typedef struct {
     uint8_t attenuation; /* One for each retained dust-to-dust step. */
 } RedstonePlanInput;
 
+/* Reverse view of one semantic input. When a source output changes, its
+ * contiguous consumer range identifies exactly which targets may be dirty.
+ * input_offset is relative to the target node's first_input. */
+typedef struct {
+    RedstoneNodeId target;
+    uint16_t input_offset;
+} RedstonePlanConsumer;
+
 typedef struct {
     BlockPos pos;
     /* Initial state is copied out of the world. Backends own mutable runtime
@@ -65,8 +73,10 @@ typedef struct {
     BlockState initial_state;
     uint32_t first_edge;
     uint32_t first_input;
+    uint32_t first_consumer;
     uint16_t edge_count;
     uint16_t input_count;
+    uint16_t consumer_count;
     uint8_t flags;
 } RedstonePlanNode;
 
@@ -75,7 +85,8 @@ typedef struct {
     RedstonePlanNode *nodes;
     RedstonePlanEdge *edges;
     RedstonePlanInput *inputs;
-    size_t node_count, edge_count, input_count;
+    RedstonePlanConsumer *consumers;
+    size_t node_count, edge_count, input_count, consumer_count;
     size_t adjacent_edge_count, wire_edge_count;
     size_t default_input_count, side_input_count, direct_input_count;
     size_t boundary_node_count, timed_node_count, runtime_node_count;
@@ -87,13 +98,13 @@ typedef struct {
 void redstone_plan_init(RedstonePlan *plan);
 void redstone_plan_destroy(RedstonePlan *plan);
 
-/* Build a logically read-only, lossless block topology and semantic input
- * table for an inclusive region. world_get may page stored chunks into memory,
- * but blocks, simulation time and scheduled work are not changed. The
- * destination must be empty. Every non-air block is retained; no constant
- * folding or node coalescing is performed. Nodes depending on non-air blocks
- * outside the region are marked as boundary nodes so an executor cannot
- * silently treat an open plan as closed. */
+/* Build a logically read-only, lossless block topology, semantic input table
+ * and its source-to-consumer reverse index for an inclusive region. world_get
+ * may page stored chunks into memory, but blocks, simulation time and scheduled
+ * work are not changed. The destination must be empty. Every non-air block is
+ * retained; no constant folding or node coalescing is performed. Nodes
+ * depending on non-air blocks outside the region are marked as boundary nodes
+ * so an executor cannot silently treat an open plan as closed. */
 RsResult redstone_plan_build(const World *world, RedstonePlanBounds bounds,
                              RedstonePlan *plan);
 
