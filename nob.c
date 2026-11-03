@@ -34,6 +34,7 @@ static const char *common_sources[] = {
     "src/sim.c",
     "src/sim_executor.c",
     "src/redstone_plan.c",
+    "src/redstone_queue.c",
     "src/piston_motion.c",
     "src/block_updates.c",
     "src/wire_solver.c",
