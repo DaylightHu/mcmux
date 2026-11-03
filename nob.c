@@ -979,7 +979,7 @@ static void print_help(const char *program)
     printf("  precommit    Stage the exact raylib set and verify an index-only build\n");
     printf("  test         Build and run the structure persistence tests\n");
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
-    printf("  benchmark    Run the deterministic redstone scaling benchmark\n");
+    printf("  benchmark    Run the consolidated redstone benchmark suite\n");
     printf("  lib          Build build/libmcmux.a (no GUI dependencies)\n");
     printf("  build-c FILE Build a user C program linked with the simulation core\n");
     printf("  run-c FILE   Build and run a user C program from the repository root\n");
