@@ -6,10 +6,7 @@ enum { OBSERVER_DELAY = 2, OBSERVER_PULSE = 2 };
 static uint8_t observer_signal(const World *world, BlockPos position,
                                Direction face, SignalMode mode)
 {
-    (void)mode;
-    BlockState state = world_get(world, position);
-    return state.data.observer.powered &&
-           face == (Direction)state.data.observer.facing ? 15 : 0;
+    return block_state_signal(world_get(world, position), face, mode, false);
 }
 
 static void observer_observed_changed(World *world, BlockPos position,

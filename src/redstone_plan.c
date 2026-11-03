@@ -215,6 +215,8 @@ static bool build_edges(const World *world, PlanBuilder *builder)
             }
         }
         if (node->initial_state.id == BLOCK_REDSTONE_WIRE) {
+            node->wire_output_faces = wire_connection_state(
+                world, node->pos, node->initial_state).data.wire.connections;
             BlockPos neighbors[12];
             size_t count = wire_neighbors(world, node->pos, neighbors);
             for (size_t i = 0; i < count; ++i) {

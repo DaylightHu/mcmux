@@ -11,18 +11,13 @@ bool lever_supported(const World *world, BlockPos position, Direction support)
 static uint8_t lever_signal(const World *world, BlockPos position,
                             Direction face, SignalMode mode)
 {
-    (void)face;
-    (void)mode;
-    return world_get(world, position).data.lever.powered ? 15 : 0;
+    return block_state_signal(world_get(world, position), face, mode, false);
 }
 
 static uint8_t lever_direct(const World *world, BlockPos position,
                             Direction face, SignalMode mode)
 {
-    (void)mode;
-    BlockState state = world_get(world, position);
-    return state.data.lever.powered &&
-           face == (Direction)state.data.lever.support_dir ? 15 : 0;
+    return block_state_signal(world_get(world, position), face, mode, true);
 }
 
 void lever_update_neighbors(World *world, BlockPos position, BlockState state)

@@ -77,6 +77,9 @@ typedef struct {
     uint16_t edge_count;
     uint16_t input_count;
     uint16_t consumer_count;
+    /* Resolved output faces for dust on this fixed topology. The stored
+     * block-state arms can differ from wire_connection_state's query result. */
+    uint8_t wire_output_faces;
     uint8_t flags;
 } RedstonePlanNode;
 

@@ -1,5 +1,6 @@
 #include "block_internal.h"
 #include "sim_internal.h"
+#include "sim_executor.h"
 
 enum { REPEATER_DELAY_SCALE = 2 };
 
@@ -16,6 +17,9 @@ static bool valid_facing(Direction facing)
 static bool repeater_input_powered(const World *world, BlockPos position,
                                    BlockState state)
 {
+    RedstoneEvaluation value;
+    if (sim_executor_evaluate(world, position, state, &value) == RS_OK)
+        return value.input > 0;
     Direction facing = (Direction)state.data.repeater.facing;
     if (!valid_facing(facing)) return false;
     Direction rear = direction_opposite(facing);
@@ -29,6 +33,9 @@ static bool repeater_input_powered(const World *world, BlockPos position,
 bool repeater_is_locked(const World *world, BlockPos position,
                                  BlockState state)
 {
+    RedstoneEvaluation value;
+    if (sim_executor_evaluate(world, position, state, &value) == RS_OK)
+        return value.locked;
     Direction facing = (Direction)state.data.repeater.facing;
     if (!valid_facing(facing)) return false;
     const Direction *sides;
@@ -68,10 +75,7 @@ static bool repeater_should_prioritize(const World *world, BlockPos position,
 static uint8_t repeater_signal(const World *world, BlockPos position,
                                Direction face, SignalMode mode)
 {
-    (void)mode;
-    BlockState state = world_get(world, position);
-    return state.data.repeater.powered &&
-           face == (Direction)state.data.repeater.facing ? 15 : 0;
+    return block_state_signal(world_get(world, position), face, mode, false);
 }
 
 void repeater_check_input(World *world, BlockPos position)

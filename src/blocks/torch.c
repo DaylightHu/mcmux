@@ -1,5 +1,6 @@
 #include "block_internal.h"
 #include "sim_internal.h"
+#include "sim_executor.h"
 
 enum {
     TORCH_DELAY = 2,
@@ -18,6 +19,9 @@ bool torch_supported(const World *world, BlockPos position, Direction support)
 static bool input_powered(const World *world, BlockPos position)
 {
     BlockState state = world_get(world, position);
+    RedstoneEvaluation value;
+    if (sim_executor_evaluate(world, position, state, &value) == RS_OK)
+        return value.input > 0;
     Direction support_dir = (Direction)state.data.torch.support_dir;
     BlockPos support = block_offset(position, support_dir);
 
@@ -32,15 +36,14 @@ static bool input_powered(const World *world, BlockPos position)
 static uint8_t torch_signal(const World *world, BlockPos position,
                             Direction face, SignalMode mode)
 {
-    (void)mode;
-    BlockState state = world_get(world, position);
-    return state.data.torch.lit && face != (Direction)state.data.torch.support_dir ? 15 : 0;
+    return block_state_signal(world_get(world, position), face, mode, false);
 }
 
 static uint8_t torch_direct(const World *world, BlockPos position,
                             Direction face, SignalMode mode)
 {
-    return face == DIR_UP ? torch_signal(world, position, face, mode) : 0;
+    return face == DIR_UP ?
+           block_state_signal(world_get(world, position), face, mode, true) : 0;
 }
 
 void torch_check_input(World *world, BlockPos position)

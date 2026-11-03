@@ -1,5 +1,6 @@
 #include "wire_solver.h"
 #include "sim_internal.h"
+#include "sim_executor.h"
 
 static const Direction horizontal[] = {DIR_NORTH, DIR_EAST, DIR_SOUTH, DIR_WEST};
 static const Direction values[] = {
@@ -32,8 +33,11 @@ static uint8_t calculate_strength(const World *w, BlockPos p, uint8_t external)
     return external > adjacent ? external : adjacent;
 }
 
-static uint8_t target_strength(World *w, BlockPos p)
+static uint8_t target_strength(World *w, BlockPos p, BlockState state)
 {
+    RedstoneEvaluation value;
+    if (sim_executor_evaluate(w, p, state, &value) == RS_OK)
+        return value.target_power;
     uint32_t hash = (uint32_t)p.x*0x9e3779b1u ^ (uint32_t)p.y*0x85ebca6bu ^
                     (uint32_t)p.z*0xc2b2ae35u;
     WirePowerEntry *entry = &w->wire_powers[hash & (WORLD_READ_CACHE_SIZE - 1)];
@@ -88,7 +92,7 @@ static void power_neighbors(World *w, BlockPos pos)
 void wire_update_power(World *w, BlockPos pos, BlockState previous)
 {
     ++w->sim->stats.wires_visited;
-    uint8_t power = target_strength(w, pos);
+    uint8_t power = target_strength(w, pos, previous);
     if (previous.data.wire.power == power) return;
     if (block_states_equal(world_get(w, pos), previous)) {
         BlockState state = previous;

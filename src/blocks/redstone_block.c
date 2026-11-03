@@ -5,9 +5,8 @@ static uint8_t source_signal(const World *world, BlockPos position,
 {
     (void)world;
     (void)position;
-    (void)face;
-    (void)mode;
-    return 15;
+    return block_state_signal((BlockState){.id = BLOCK_REDSTONE_BLOCK},
+                              face, mode, false);
 }
 
 /* Supports dust and torches, but is not a passive redstone conductor. */
