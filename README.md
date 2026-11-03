@@ -123,8 +123,10 @@ Inputs use a fixed seed and one of `dense`, `sparse` or `random` patterns.
 Unless `--no-verify` is supplied, an untimed pass compares every output and
 the ordered state-write trace after every game tick. Plan preparation is
 reported separately from measured execution. CPU results are rejected if the
-plan becomes inactive or any query falls back to the reference path. Record
-the commit, command, compiler and machine together with each `RESULT` line;
+plan becomes inactive or any query falls back to the reference path. The
+terminal report uses Markdown tables so the complete result can be pasted
+directly into a GitHub commit, pull request or issue. Its final `RESULT` line
+remains machine-readable. Record the commit and command with that report;
 generated worlds and timing files are build artifacts and are not committed.
 
 ## References

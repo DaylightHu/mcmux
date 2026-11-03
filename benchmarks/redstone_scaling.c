@@ -49,6 +49,11 @@ typedef struct {
     bool valid;
 } WriteTrace;
 
+typedef struct {
+    uint64_t writes, digest;
+    bool ran;
+} VerifyResult;
+
 static const char *cell_name(CellKind cell)
 {
     return cell == CELL_REPEATER ? "repeater" : "csa";
@@ -482,6 +487,43 @@ static uint64_t hash_mix(uint64_t hash, uint64_t value)
     return (hash << 27 | hash >> 37) * 5 + UINT64_C(0x52dce729);
 }
 
+static void format_count(char *buffer, size_t size, uint64_t value)
+{
+    char reverse[32];
+    size_t count = 0, digits = 0;
+    do {
+        if (digits && digits % 3 == 0) reverse[count++] = ',';
+        reverse[count++] = (char)('0' + value % 10);
+        value /= 10;
+        ++digits;
+    } while (value && count < sizeof(reverse));
+    size_t output = count < size - 1 ? count : size - 1;
+    for (size_t i = 0; i < output; ++i) buffer[i] = reverse[count - i - 1];
+    buffer[output] = '\0';
+}
+
+static void format_rate(char *buffer, size_t size, double value,
+                        const char *unit)
+{
+    const char *prefix = "";
+    if (value >= 1000000000.0) { value /= 1000000000.0; prefix = "G"; }
+    else if (value >= 1000000.0) { value /= 1000000.0; prefix = "M"; }
+    else if (value >= 1000.0) { value /= 1000.0; prefix = "k"; }
+    snprintf(buffer, size, "%.3f%s %s", value, prefix, unit);
+}
+
+static void format_time_change(char *buffer, size_t size,
+                               double reference, double cpu)
+{
+    double ratio = cpu / reference;
+    if (ratio > 1.0005)
+        snprintf(buffer, size, "%.2f%% slower", (ratio - 1.0) * 100.0);
+    else if (ratio < 0.9995)
+        snprintf(buffer, size, "%.2f%% faster", (1.0 - ratio) * 100.0);
+    else
+        snprintf(buffer, size, "effectively equal");
+}
+
 static uint64_t output_digest(const Fixture *fixture)
 {
     uint64_t hash = UINT64_C(0x6a09e667f3bcc909);
@@ -511,11 +553,12 @@ static void trace_write(void *context, BlockPos pos,
     ++trace->count;
 }
 
-static bool verify_equivalence(const Config *config)
+static bool verify_equivalence(const Config *config, VerifyResult *verification)
 {
     Fixture reference = {0}, cpu = {0};
     uint8_t *states = NULL, *toggles = NULL;
     bool ok = false;
+    *verification = (VerifyResult){.ran = true};
     if (!fixture_build(config, &reference) || !fixture_build(config, &cpu))
         goto done;
     if (reference.input_count != cpu.input_count ||
@@ -582,10 +625,8 @@ static bool verify_equivalence(const Config *config)
             (unsigned long long)sim_stats(cpu.world).cpu_fallbacks);
         goto done;
     }
-    printf("VERIFY status=ok ticks=%u writes=%llu digest=%016llx\n",
-        config->ticks,
-        (unsigned long long)reference_trace.count,
-        (unsigned long long)output_digest(&reference));
+    verification->writes = reference_trace.count;
+    verification->digest = output_digest(&reference);
     ok = true;
 
 done:
@@ -685,20 +726,45 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 2;
     }
-    printf("CONFIG cell=%s width=%u depth=%u modules=%llu ticks=%u period=%u "
-           "pattern=%s seed=%llu rounds=%u verify=%s platform=%s compiler=%s\n",
-        cell_name(config.cell), config.width, config.depth,
-        (unsigned long long)((uint64_t)config.width * config.depth),
-        config.ticks, config.period, pattern_name(config.pattern),
-        (unsigned long long)config.seed, config.rounds,
-        config.verify ? "yes" : "no", platform_name(),
+    printf("\n## Redstone scaling benchmark\n\n");
+    printf("| Configuration | Value |\n");
+    printf("|:--|--:|\n");
+    printf("| Cell | `%s` |\n", cell_name(config.cell));
+    printf("| Layout | %u wide x %u deep |\n", config.width, config.depth);
+    printf("| Modules | %llu |\n",
+        (unsigned long long)((uint64_t)config.width * config.depth));
+    printf("| Game ticks | %u |\n", config.ticks);
+    printf("| Input period | %u gt |\n", config.period);
+    printf("| Input pattern | `%s` (seed %llu) |\n",
+        pattern_name(config.pattern), (unsigned long long)config.seed);
+    printf("| Timed pairs | %u |\n", config.rounds);
+    printf("| Platform | `%s` |\n", platform_name());
+    printf("| Compiler | `%s` |\n",
 #ifdef __VERSION__
         __VERSION__
 #else
         "unknown"
 #endif
     );
-    if (config.verify && !verify_equivalence(&config)) return 1;
+    fflush(stdout);
+
+    VerifyResult verification = {0};
+    if (config.verify && !verify_equivalence(&config, &verification)) return 1;
+    printf("\n### Correctness\n\n");
+    if (verification.ran) {
+        char writes[32];
+        format_count(writes, sizeof(writes), verification.writes);
+        printf("**PASS** - every output and all %s ordered state writes matched "
+               "at every game tick (`%016llx`).\n",
+            writes, (unsigned long long)verification.digest);
+    } else {
+        printf("**SKIPPED** - `--no-verify` was supplied.\n");
+    }
+
+    printf("\n### Timed rounds\n\n");
+    printf("| Round | Reference | CPU | Paired speedup | CPU preparation |\n");
+    printf("|--:|--:|--:|--:|--:|\n");
+    fflush(stdout);
 
     double *reference_times = calloc(config.rounds, sizeof(*reference_times));
     double *cpu_times = calloc(config.rounds, sizeof(*cpu_times));
@@ -743,11 +809,10 @@ int main(int argc, char **argv)
         prepare_times[round] = cpu.prepare_seconds;
         speedups[round] = reference.seconds / cpu.seconds;
         cpu_stats = cpu.stats;
-        printf("ROUND index=%u reference_seconds=%.9f cpu_seconds=%.9f "
-               "speedup=%.6f cpu_prepare_seconds=%.9f digest=%016llx\n",
-            round + 1, reference.seconds, cpu.seconds,
-            reference.seconds / cpu.seconds, cpu.prepare_seconds,
-            (unsigned long long)reference.digest);
+        printf("| %u | %.3f ms | %.3f ms | %.4fx | %.3f ms |\n",
+            round + 1, reference.seconds * 1000.0, cpu.seconds * 1000.0,
+            reference.seconds / cpu.seconds, cpu.prepare_seconds * 1000.0);
+        fflush(stdout);
     }
 
     double reference = median(reference_times, config.rounds);
@@ -756,8 +821,69 @@ int main(int argc, char **argv)
     double speedup = median(speedups, config.rounds);
     double module_ticks = (double)config.width * config.depth * config.ticks;
     if (reference < 0.25 || cpu < 0.25)
-        printf("WARNING median runtime is below 0.25 s; "
-               "increase --ticks for a stable record\n");
+        printf("\n> **Warning:** median runtime is below 0.25 s; "
+               "increase `--ticks` for a stable record.\n");
+
+    double reference_gt = config.ticks / reference;
+    double cpu_gt = config.ticks / cpu;
+    double reference_modules = module_ticks / reference;
+    double cpu_modules = module_ticks / cpu;
+    char change[48], reference_gt_text[48], cpu_gt_text[48];
+    char reference_modules_text[48], cpu_modules_text[48];
+    format_time_change(change, sizeof(change), reference, cpu);
+    format_rate(reference_gt_text, sizeof(reference_gt_text), reference_gt, "gt/s");
+    format_rate(cpu_gt_text, sizeof(cpu_gt_text), cpu_gt, "gt/s");
+    format_rate(reference_modules_text, sizeof(reference_modules_text),
+                reference_modules, "module-gt/s");
+    format_rate(cpu_modules_text, sizeof(cpu_modules_text),
+                cpu_modules, "module-gt/s");
+
+    printf("\n### Summary\n\n");
+    printf("| Metric | Reference | CPU | CPU result |\n");
+    printf("|:--|--:|--:|:--|\n");
+    printf("| Median wall time | %.3f ms | %.3f ms | **%s** |\n",
+           reference * 1000.0, cpu * 1000.0, change);
+    printf("| Game-tick throughput | %s | %s | %.4fx |\n",
+           reference_gt_text, cpu_gt_text, cpu_gt / reference_gt);
+    printf("| Module throughput | %s | %s | %.4fx |\n",
+           reference_modules_text, cpu_modules_text,
+           cpu_modules / reference_modules);
+    printf("| Median paired speedup | - | - | **%.4fx** |\n", speedup);
+
+    char evaluations[32], hits[32], fallbacks[32], neighbor_checks[32];
+    char wires[32], wire_changes[32], events[32], pending[32];
+    format_count(evaluations, sizeof(evaluations), cpu_stats.cpu_evaluations);
+    format_count(hits, sizeof(hits), cpu_stats.cpu_cache_hits);
+    format_count(fallbacks, sizeof(fallbacks), cpu_stats.cpu_fallbacks);
+    format_count(neighbor_checks, sizeof(neighbor_checks), cpu_stats.neighbor_checks);
+    format_count(wires, sizeof(wires), cpu_stats.wires_visited);
+    format_count(wire_changes, sizeof(wire_changes), cpu_stats.wire_changes);
+    format_count(events, sizeof(events), cpu_stats.events_processed);
+    format_count(pending, sizeof(pending), cpu_stats.pending_events);
+    double successful_queries = (double)cpu_stats.cpu_evaluations +
+                                cpu_stats.cpu_cache_hits;
+    double hit_rate = successful_queries ?
+        100.0 * cpu_stats.cpu_cache_hits / successful_queries : 0.0;
+    printf("\n### CPU backend details\n\n");
+    printf("| Metric | Value |\n");
+    printf("|:--|--:|\n");
+    printf("| Plan preparation | %.3f ms |\n", prepare * 1000.0);
+    printf("| Computed queries | %s |\n", evaluations);
+    printf("| Cache hits | %s (%.2f%% hit rate) |\n", hits, hit_rate);
+    printf("| Fallback queries | **%s** |\n", fallbacks);
+    if (cpu < reference)
+        printf("| Preparation break-even | %.2f measured windows |\n",
+               prepare / (reference - cpu));
+    else
+        printf("| Preparation break-even | Not reached; CPU runtime is slower |\n");
+
+    printf("\n### Work performed\n\n");
+    printf("| Neighbor checks | Wires visited | Wire changes | Events processed | Pending events |\n");
+    printf("|--:|--:|--:|--:|--:|\n");
+    printf("| %s | %s | %s | %s | %s |\n",
+           neighbor_checks, wires, wire_changes, events, pending);
+
+    printf("\n### Machine-readable result\n\n");
     printf("RESULT cell=%s width=%u depth=%u modules=%llu ticks=%u period=%u "
            "pattern=%s seed=%llu rounds=%u verify=%s platform=%s "
            "reference_seconds=%.9f cpu_seconds=%.9f speedup=%.6f "
