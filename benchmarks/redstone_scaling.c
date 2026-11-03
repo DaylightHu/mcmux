@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +55,83 @@ typedef struct {
     bool ran;
 } VerifyResult;
 
+typedef struct {
+    const char *name;
+    const char *description;
+    Config config;
+} Scenario;
+
+typedef enum {
+    RUN_SUITE,
+    RUN_SCENARIO,
+    RUN_CUSTOM
+} RunMode;
+
+typedef struct {
+    RunMode mode;
+    const char *scenario_name;
+    const char *output_path;
+    Config custom;
+    uint32_t rounds_override;
+    uint64_t seed;
+    bool verify;
+    bool quick;
+    bool verbose;
+    bool write_report;
+} Options;
+
+typedef struct {
+    Scenario scenario;
+    VerifyResult verification;
+    double reference_seconds;
+    double cpu_seconds;
+    double prepare_seconds;
+    double paired_speedup;
+    double reference_rounds[31];
+    double cpu_rounds[31];
+    double prepare_rounds[31];
+    double speedup_rounds[31];
+    SimStats cpu_stats;
+    bool short_runtime;
+} BenchmarkResult;
+
+typedef struct {
+    FILE *copy;
+} Report;
+
+static const Scenario scenarios[] = {
+    {
+        "balanced-repeater",
+        "Balanced repeater matrix",
+        {CELL_REPEATER, PATTERN_DENSE, 64, 32, 4096, 4, 7, 1, true}
+    },
+    {
+        "parallel-repeater",
+        "Extreme parallel repeater bank",
+        {CELL_REPEATER, PATTERN_DENSE, 2048, 1, 4096, 4, 7, 1, true}
+    },
+    {
+        "serial-repeater",
+        "Extreme serial repeater chain",
+        {CELL_REPEATER, PATTERN_DENSE, 1, 1024, 8192, 4, 7, 1, true}
+    },
+    {
+        "sparse-repeater",
+        "Sparse repeater matrix",
+        {CELL_REPEATER, PATTERN_SPARSE, 64, 64, 32768, 4, 7, 1, true}
+    },
+    {
+        "csa-random",
+        "Parallel CSA bank with random inputs",
+        {CELL_CSA, PATTERN_RANDOM, 256, 1, 4096, 8, 7, 1, true}
+    },
+    {
+        "csa-dense",
+        "Parallel CSA bank with dense inputs",
+        {CELL_CSA, PATTERN_DENSE, 256, 1, 4096, 8, 7, 1, true}
+    },
+};
+
 static const char *cell_name(CellKind cell)
 {
     return cell == CELL_REPEATER ? "repeater" : "csa";
@@ -85,20 +163,38 @@ static const char *platform_name(void)
 static void usage(const char *program)
 {
     printf("Usage: %s [options]\n\n", program);
-    printf("Build a deterministic vanilla-redstone workload, then compare the\n");
-    printf("reference and optional CPU query backends for the same game ticks.\n\n");
-    printf("Options:\n");
+    printf("Run the complete deterministic benchmark suite and produce one\n");
+    printf("Markdown report. With no options all maintained scenarios run.\n\n");
+    printf("Suite options:\n");
+    printf("  --scenario NAME      Run one maintained scenario\n");
+    printf("  --list-scenarios     List maintained scenario names\n");
+    printf("  --quick              Short smoke-test version of the selected suite\n");
+    printf("  --rounds N           Override timed pairs for every selected scenario\n");
+    printf("  --seed N             Override the deterministic input seed\n");
+    printf("  --no-verify          Skip the untimed per-tick equivalence pass\n");
+    printf("  --verbose            Include every timed pair in the report\n");
+    printf("  --output PATH        Report path (default: build/benchmark-report.md)\n");
+    printf("  --no-output          Print only; do not save a report file\n\n");
+    printf("Custom workload options (select custom mode automatically):\n");
     printf("  --cell repeater|csa  Circuit cell (default: repeater)\n");
     printf("  --width N            Parallel lanes/cells (default: 64)\n");
     printf("  --depth N            Serial stages per lane (default: 32)\n");
     printf("  --ticks N            Measured game ticks (default: 512)\n");
     printf("  --period N           Game ticks between input batches (default: 4)\n");
-    printf("  --rounds N           Timed reference/CPU pairs (default: 7)\n");
-    printf("  --seed N             Deterministic input seed (default: 1)\n");
-    printf("  --pattern NAME       dense, sparse or random (default: dense)\n");
-    printf("  --no-verify          Skip the untimed per-tick equivalence pass\n");
-    printf("  --help               Show this help\n\n");
-    printf("CSA cells are independent saved structures and currently require depth=1.\n");
+    printf("  --pattern NAME       dense, sparse or random (default: dense)\n\n");
+    printf("  --help               Show this help\n");
+}
+
+static void list_scenarios(void)
+{
+    printf("Maintained benchmark scenarios:\n\n");
+    for (size_t i = 0; i < sizeof(scenarios) / sizeof(scenarios[0]); ++i) {
+        const Config *config = &scenarios[i].config;
+        printf("  %-20s %s (%s, %ux%u, %u gt, %s)\n",
+            scenarios[i].name, scenarios[i].description,
+            cell_name(config->cell), config->width, config->depth,
+            config->ticks, pattern_name(config->pattern));
+    }
 }
 
 static bool parse_u32(const char *text, uint32_t *value)
@@ -133,60 +229,8 @@ static bool option_value(int argc, char **argv, int *index, const char **value)
     return true;
 }
 
-static bool parse_config(int argc, char **argv, Config *config)
+static bool validate_config(const Config *config)
 {
-    *config = (Config){
-        .cell = CELL_REPEATER,
-        .pattern = PATTERN_DENSE,
-        .width = 64,
-        .depth = 32,
-        .ticks = 512,
-        .period = 4,
-        .rounds = 7,
-        .seed = 1,
-        .verify = true,
-    };
-    for (int i = 1; i < argc; ++i) {
-        const char *value = NULL;
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            usage(argv[0]);
-            exit(0);
-        } else if (strcmp(argv[i], "--no-verify") == 0) {
-            config->verify = false;
-        } else if (strcmp(argv[i], "--cell") == 0) {
-            if (!option_value(argc, argv, &i, &value)) return false;
-            if (strcmp(value, "repeater") == 0) config->cell = CELL_REPEATER;
-            else if (strcmp(value, "csa") == 0) config->cell = CELL_CSA;
-            else { fprintf(stderr, "unknown cell: %s\n", value); return false; }
-        } else if (strcmp(argv[i], "--pattern") == 0) {
-            if (!option_value(argc, argv, &i, &value)) return false;
-            if (strcmp(value, "dense") == 0) config->pattern = PATTERN_DENSE;
-            else if (strcmp(value, "sparse") == 0) config->pattern = PATTERN_SPARSE;
-            else if (strcmp(value, "random") == 0) config->pattern = PATTERN_RANDOM;
-            else { fprintf(stderr, "unknown pattern: %s\n", value); return false; }
-        } else if (strcmp(argv[i], "--width") == 0) {
-            if (!option_value(argc, argv, &i, &value) ||
-                !parse_u32(value, &config->width)) return false;
-        } else if (strcmp(argv[i], "--depth") == 0) {
-            if (!option_value(argc, argv, &i, &value) ||
-                !parse_u32(value, &config->depth)) return false;
-        } else if (strcmp(argv[i], "--ticks") == 0) {
-            if (!option_value(argc, argv, &i, &value) ||
-                !parse_u32(value, &config->ticks)) return false;
-        } else if (strcmp(argv[i], "--period") == 0) {
-            if (!option_value(argc, argv, &i, &value) ||
-                !parse_u32(value, &config->period)) return false;
-        } else if (strcmp(argv[i], "--rounds") == 0) {
-            if (!option_value(argc, argv, &i, &value) ||
-                !parse_u32(value, &config->rounds)) return false;
-        } else if (strcmp(argv[i], "--seed") == 0) {
-            if (!option_value(argc, argv, &i, &value) ||
-                !parse_u64(value, &config->seed)) return false;
-        } else {
-            fprintf(stderr, "unknown option: %s\n", argv[i]);
-            return false;
-        }
-    }
     if (!config->width || !config->depth || !config->ticks ||
         !config->period || !config->rounds || config->rounds > 31) {
         fprintf(stderr, "width, depth, ticks and period must be positive; rounds must be 1..31\n");
@@ -202,6 +246,118 @@ static bool parse_config(int argc, char **argv, Config *config)
         fprintf(stderr, "workload exceeds the %llu-module safety limit for %s cells\n",
                 (unsigned long long)limit, cell_name(config->cell));
         return false;
+    }
+    return true;
+}
+
+static bool parse_options(int argc, char **argv, Options *options)
+{
+    *options = (Options){
+        .mode = RUN_SUITE,
+        .output_path = "build/benchmark-report.md",
+        .custom = {
+            .cell = CELL_REPEATER,
+            .pattern = PATTERN_DENSE,
+            .width = 64,
+            .depth = 32,
+            .ticks = 512,
+            .period = 4,
+            .rounds = 7,
+            .seed = 1,
+            .verify = true,
+        },
+        .seed = 1,
+        .verify = true,
+        .write_report = true,
+    };
+    bool custom = false;
+    for (int i = 1; i < argc; ++i) {
+        const char *value = NULL;
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            usage(argv[0]);
+            exit(0);
+        } else if (strcmp(argv[i], "--list-scenarios") == 0) {
+            list_scenarios();
+            exit(0);
+        } else if (strcmp(argv[i], "--quick") == 0) {
+            options->quick = true;
+        } else if (strcmp(argv[i], "--verbose") == 0) {
+            options->verbose = true;
+        } else if (strcmp(argv[i], "--no-verify") == 0) {
+            options->verify = false;
+            options->custom.verify = false;
+        } else if (strcmp(argv[i], "--no-output") == 0) {
+            options->write_report = false;
+        } else if (strcmp(argv[i], "--output") == 0) {
+            if (!option_value(argc, argv, &i, &value)) return false;
+            options->output_path = value;
+            options->write_report = true;
+        } else if (strcmp(argv[i], "--scenario") == 0) {
+            if (!option_value(argc, argv, &i, &value)) return false;
+            options->mode = RUN_SCENARIO;
+            options->scenario_name = value;
+        } else if (strcmp(argv[i], "--cell") == 0) {
+            if (!option_value(argc, argv, &i, &value)) return false;
+            if (strcmp(value, "repeater") == 0) options->custom.cell = CELL_REPEATER;
+            else if (strcmp(value, "csa") == 0) options->custom.cell = CELL_CSA;
+            else { fprintf(stderr, "unknown cell: %s\n", value); return false; }
+            custom = true;
+        } else if (strcmp(argv[i], "--pattern") == 0) {
+            if (!option_value(argc, argv, &i, &value)) return false;
+            if (strcmp(value, "dense") == 0) options->custom.pattern = PATTERN_DENSE;
+            else if (strcmp(value, "sparse") == 0) options->custom.pattern = PATTERN_SPARSE;
+            else if (strcmp(value, "random") == 0) options->custom.pattern = PATTERN_RANDOM;
+            else { fprintf(stderr, "unknown pattern: %s\n", value); return false; }
+            custom = true;
+        } else if (strcmp(argv[i], "--width") == 0) {
+            if (!option_value(argc, argv, &i, &value) ||
+                !parse_u32(value, &options->custom.width)) return false;
+            custom = true;
+        } else if (strcmp(argv[i], "--depth") == 0) {
+            if (!option_value(argc, argv, &i, &value) ||
+                !parse_u32(value, &options->custom.depth)) return false;
+            custom = true;
+        } else if (strcmp(argv[i], "--ticks") == 0) {
+            if (!option_value(argc, argv, &i, &value) ||
+                !parse_u32(value, &options->custom.ticks)) return false;
+            custom = true;
+        } else if (strcmp(argv[i], "--period") == 0) {
+            if (!option_value(argc, argv, &i, &value) ||
+                !parse_u32(value, &options->custom.period)) return false;
+            custom = true;
+        } else if (strcmp(argv[i], "--rounds") == 0) {
+            if (!option_value(argc, argv, &i, &value) ||
+                !parse_u32(value, &options->rounds_override)) return false;
+            if (!options->rounds_override) {
+                fprintf(stderr, "rounds must be 1..31\n");
+                return false;
+            }
+        } else if (strcmp(argv[i], "--seed") == 0) {
+            if (!option_value(argc, argv, &i, &value) ||
+                !parse_u64(value, &options->seed)) return false;
+            options->custom.seed = options->seed;
+        } else {
+            fprintf(stderr, "unknown option: %s\n", argv[i]);
+            return false;
+        }
+    }
+    if (custom && options->mode == RUN_SCENARIO) {
+        fprintf(stderr, "--scenario cannot be combined with custom workload options\n");
+        return false;
+    }
+    if (custom && options->quick) {
+        fprintf(stderr, "--quick applies to maintained scenarios, not custom workloads\n");
+        return false;
+    }
+    if (options->rounds_override > 31) {
+        fprintf(stderr, "rounds must be 1..31\n");
+        return false;
+    }
+    if (custom) {
+        options->mode = RUN_CUSTOM;
+        if (options->rounds_override)
+            options->custom.rounds = options->rounds_override;
+        return validate_config(&options->custom);
     }
     return true;
 }
@@ -502,16 +658,6 @@ static void format_count(char *buffer, size_t size, uint64_t value)
     buffer[output] = '\0';
 }
 
-static void format_rate(char *buffer, size_t size, double value,
-                        const char *unit)
-{
-    const char *prefix = "";
-    if (value >= 1000000000.0) { value /= 1000000000.0; prefix = "G"; }
-    else if (value >= 1000000.0) { value /= 1000000.0; prefix = "M"; }
-    else if (value >= 1000.0) { value /= 1000.0; prefix = "k"; }
-    snprintf(buffer, size, "%.3f%s %s", value, prefix, unit);
-}
-
 static void format_time_change(char *buffer, size_t size,
                                double reference, double cpu)
 {
@@ -719,199 +865,331 @@ static bool work_stats_equal(SimStats a, SimStats b)
            a.pending_events == b.pending_events;
 }
 
-int main(int argc, char **argv)
+static double median_copy(const double *values, size_t count)
 {
-    Config config;
-    if (!parse_config(argc, argv, &config)) {
-        usage(argv[0]);
-        return 2;
-    }
-    printf("\n## Redstone scaling benchmark\n\n");
-    printf("| Configuration | Value |\n");
-    printf("|:--|--:|\n");
-    printf("| Cell | `%s` |\n", cell_name(config.cell));
-    printf("| Layout | %u wide x %u deep |\n", config.width, config.depth);
-    printf("| Modules | %llu |\n",
-        (unsigned long long)((uint64_t)config.width * config.depth));
-    printf("| Game ticks | %u |\n", config.ticks);
-    printf("| Input period | %u gt |\n", config.period);
-    printf("| Input pattern | `%s` (seed %llu) |\n",
-        pattern_name(config.pattern), (unsigned long long)config.seed);
-    printf("| Timed pairs | %u |\n", config.rounds);
-    printf("| Platform | `%s` |\n", platform_name());
-    printf("| Compiler | `%s` |\n",
-#ifdef __VERSION__
-        __VERSION__
-#else
-        "unknown"
-#endif
-    );
-    fflush(stdout);
+    double copy[31];
+    memcpy(copy, values, count * sizeof(*copy));
+    return median(copy, count);
+}
 
-    VerifyResult verification = {0};
-    if (config.verify && !verify_equivalence(&config, &verification)) return 1;
-    printf("\n### Correctness\n\n");
-    if (verification.ran) {
-        char writes[32];
-        format_count(writes, sizeof(writes), verification.writes);
-        printf("**PASS** - every output and all %s ordered state writes matched "
-               "at every game tick (`%016llx`).\n",
-            writes, (unsigned long long)verification.digest);
-    } else {
-        printf("**SKIPPED** - `--no-verify` was supplied.\n");
-    }
+static const Scenario *find_scenario(const char *name)
+{
+    for (size_t i = 0; i < sizeof(scenarios) / sizeof(scenarios[0]); ++i)
+        if (strcmp(scenarios[i].name, name) == 0) return &scenarios[i];
+    return NULL;
+}
 
-    printf("\n### Timed rounds\n\n");
-    printf("| Round | Reference | CPU | Paired speedup | CPU preparation |\n");
-    printf("|--:|--:|--:|--:|--:|\n");
-    fflush(stdout);
-
-    double *reference_times = calloc(config.rounds, sizeof(*reference_times));
-    double *cpu_times = calloc(config.rounds, sizeof(*cpu_times));
-    double *prepare_times = calloc(config.rounds, sizeof(*prepare_times));
-    double *speedups = calloc(config.rounds, sizeof(*speedups));
-    if (!reference_times || !cpu_times || !prepare_times || !speedups) {
-        free(reference_times); free(cpu_times); free(prepare_times); free(speedups);
-        return 1;
+static void apply_options(Scenario *scenario, const Options *options)
+{
+    scenario->config.seed = options->seed;
+    scenario->config.verify = options->verify;
+    if (options->rounds_override)
+        scenario->config.rounds = options->rounds_override;
+    else if (options->quick)
+        scenario->config.rounds = 3;
+    if (options->quick) {
+        scenario->config.ticks /= 8;
+        if (scenario->config.ticks < 512) scenario->config.ticks = 512;
     }
-    SimStats cpu_stats = {0};
-    for (uint32_t round = 0; round < config.rounds; ++round) {
+}
+
+static bool run_scenario(const Scenario *scenario, size_t index, size_t count,
+                         BenchmarkResult *result)
+{
+    const Config *config = &scenario->config;
+    *result = (BenchmarkResult){.scenario = *scenario};
+    if (config->verify) {
+        fprintf(stderr, "[%zu/%zu] %-20s verifying", index + 1, count,
+                scenario->name);
+        fflush(stderr);
+        if (!verify_equivalence(config, &result->verification)) {
+            fputc('\n', stderr);
+            return false;
+        }
+    }
+    for (uint32_t round = 0; round < config->rounds; ++round) {
+        fprintf(stderr, "\r[%zu/%zu] %-20s pair %u/%u", index + 1, count,
+                scenario->name, round + 1, config->rounds);
+        fflush(stderr);
         RunResult reference, cpu;
         bool ok;
         if ((round & 1u) == 0) {
-            ok = timed_run(&config, false, &reference) &&
-                 timed_run(&config, true, &cpu);
+            ok = timed_run(config, false, &reference) &&
+                 timed_run(config, true, &cpu);
         } else {
-            ok = timed_run(&config, true, &cpu) &&
-                 timed_run(&config, false, &reference);
+            ok = timed_run(config, true, &cpu) &&
+                 timed_run(config, false, &reference);
         }
         if (!ok) {
-            free(reference_times); free(cpu_times); free(prepare_times); free(speedups);
-            return 1;
+            fputc('\n', stderr);
+            return false;
         }
         if (reference.digest != cpu.digest) {
             fprintf(stderr,
-                "timed final state differs in round %u: reference=%016llx cpu=%016llx\n",
+                "\ntimed final state differs in round %u: reference=%016llx cpu=%016llx\n",
                 round + 1,
                 (unsigned long long)reference.digest,
                 (unsigned long long)cpu.digest);
-            free(reference_times); free(cpu_times); free(prepare_times); free(speedups);
-            return 1;
+            return false;
         }
         if (!work_stats_equal(reference.stats, cpu.stats)) {
-            fprintf(stderr, "reference and CPU work counters differ in round %u\n",
+            fprintf(stderr, "\nreference and CPU work counters differ in round %u\n",
                     round + 1);
-            free(reference_times); free(cpu_times); free(prepare_times); free(speedups);
-            return 1;
+            return false;
         }
-        reference_times[round] = reference.seconds;
-        cpu_times[round] = cpu.seconds;
-        prepare_times[round] = cpu.prepare_seconds;
-        speedups[round] = reference.seconds / cpu.seconds;
-        cpu_stats = cpu.stats;
-        printf("| %u | %.3f ms | %.3f ms | %.4fx | %.3f ms |\n",
-            round + 1, reference.seconds * 1000.0, cpu.seconds * 1000.0,
-            reference.seconds / cpu.seconds, cpu.prepare_seconds * 1000.0);
-        fflush(stdout);
+        result->reference_rounds[round] = reference.seconds;
+        result->cpu_rounds[round] = cpu.seconds;
+        result->prepare_rounds[round] = cpu.prepare_seconds;
+        result->speedup_rounds[round] = reference.seconds / cpu.seconds;
+        result->cpu_stats = cpu.stats;
+    }
+    result->reference_seconds = median_copy(result->reference_rounds,
+                                             config->rounds);
+    result->cpu_seconds = median_copy(result->cpu_rounds, config->rounds);
+    result->prepare_seconds = median_copy(result->prepare_rounds,
+                                           config->rounds);
+    result->paired_speedup = median_copy(result->speedup_rounds,
+                                          config->rounds);
+    result->short_runtime = result->reference_seconds < 0.25 ||
+                            result->cpu_seconds < 0.25;
+    fprintf(stderr, "\r[%zu/%zu] %-20s done: %.4fx\n", index + 1, count,
+            scenario->name, result->paired_speedup);
+    return true;
+}
+
+static void report_printf(Report *report, const char *format, ...)
+{
+    va_list args, copy;
+    va_start(args, format);
+    va_copy(copy, args);
+    vprintf(format, args);
+    if (report->copy) vfprintf(report->copy, format, copy);
+    va_end(copy);
+    va_end(args);
+}
+
+static void format_duration(char *buffer, size_t size, double seconds)
+{
+    if (seconds >= 1.0) snprintf(buffer, size, "%.3f s", seconds);
+    else snprintf(buffer, size, "%.3f ms", seconds * 1000.0);
+}
+
+static double cache_hit_rate(const BenchmarkResult *result)
+{
+    double queries = (double)result->cpu_stats.cpu_evaluations +
+                     result->cpu_stats.cpu_cache_hits;
+    return queries ? 100.0 * result->cpu_stats.cpu_cache_hits / queries : 0.0;
+}
+
+static void write_report(Report *report, const BenchmarkResult *results,
+                         size_t count, const Options *options)
+{
+    const char *profile = options->mode == RUN_CUSTOM ? "custom" :
+                          options->quick ? "quick" :
+                          options->mode == RUN_SCENARIO ? "single" : "full";
+    report_printf(report, "# mcmux redstone benchmark\n\n");
+    report_printf(report, "One command compares the reference and CPU "
+                  "backends across every selected workload.\n\n");
+    report_printf(report, "| Environment | Value |\n|:--|:--|\n");
+    report_printf(report, "| Profile | `%s` |\n", profile);
+    report_printf(report, "| Scenarios | %zu |\n", count);
+    report_printf(report, "| Platform | `%s` |\n", platform_name());
+    report_printf(report, "| Compiler | `%s` |\n",
+#ifdef __VERSION__
+                  __VERSION__
+#else
+                  "unknown"
+#endif
+    );
+    report_printf(report, "| Correctness | **%s** |\n",
+                  options->verify ? "PASS" : "SKIPPED");
+
+    report_printf(report, "\n## Performance summary\n\n");
+    report_printf(report, "| Scenario | Reference | CPU | CPU outcome | Paired speedup | Cache hit rate |\n");
+    report_printf(report, "|:--|--:|--:|:--|--:|--:|\n");
+    for (size_t i = 0; i < count; ++i) {
+        char reference[32], cpu[32], change[48];
+        format_duration(reference, sizeof(reference), results[i].reference_seconds);
+        format_duration(cpu, sizeof(cpu), results[i].cpu_seconds);
+        format_time_change(change, sizeof(change), results[i].reference_seconds,
+                           results[i].cpu_seconds);
+        report_printf(report, "| `%s` | %s | %s | **%s** | **%.4fx** | %.2f%% |\n",
+            results[i].scenario.name, reference, cpu, change,
+            results[i].paired_speedup, cache_hit_rate(&results[i]));
     }
 
-    double reference = median(reference_times, config.rounds);
-    double cpu = median(cpu_times, config.rounds);
-    double prepare = median(prepare_times, config.rounds);
-    double speedup = median(speedups, config.rounds);
-    double module_ticks = (double)config.width * config.depth * config.ticks;
-    if (reference < 0.25 || cpu < 0.25)
-        printf("\n> **Warning:** median runtime is below 0.25 s; "
-               "increase `--ticks` for a stable record.\n");
+    report_printf(report, "\n## Workloads\n\n");
+    report_printf(report, "| Scenario | Circuit | Layout | Pattern | Game ticks | Period | Pairs |\n");
+    report_printf(report, "|:--|:--|--:|:--|--:|--:|--:|\n");
+    for (size_t i = 0; i < count; ++i) {
+        const Config *config = &results[i].scenario.config;
+        report_printf(report, "| `%s` | `%s` | %u x %u | `%s` | %u | %u gt | %u |\n",
+            results[i].scenario.name, cell_name(config->cell), config->width,
+            config->depth, pattern_name(config->pattern), config->ticks,
+            config->period, config->rounds);
+    }
 
-    double reference_gt = config.ticks / reference;
-    double cpu_gt = config.ticks / cpu;
-    double reference_modules = module_ticks / reference;
-    double cpu_modules = module_ticks / cpu;
-    char change[48], reference_gt_text[48], cpu_gt_text[48];
-    char reference_modules_text[48], cpu_modules_text[48];
-    format_time_change(change, sizeof(change), reference, cpu);
-    format_rate(reference_gt_text, sizeof(reference_gt_text), reference_gt, "gt/s");
-    format_rate(cpu_gt_text, sizeof(cpu_gt_text), cpu_gt, "gt/s");
-    format_rate(reference_modules_text, sizeof(reference_modules_text),
-                reference_modules, "module-gt/s");
-    format_rate(cpu_modules_text, sizeof(cpu_modules_text),
-                cpu_modules, "module-gt/s");
+    report_printf(report, "\n## Correctness\n\n");
+    report_printf(report, "| Scenario | Status | Ordered state writes | Digest |\n");
+    report_printf(report, "|:--|:--:|--:|:--|\n");
+    for (size_t i = 0; i < count; ++i) {
+        char writes[32];
+        format_count(writes, sizeof(writes), results[i].verification.writes);
+        if (results[i].verification.ran)
+            report_printf(report, "| `%s` | **PASS** | %s | `%016llx` |\n",
+                results[i].scenario.name, writes,
+                (unsigned long long)results[i].verification.digest);
+        else
+            report_printf(report, "| `%s` | SKIPPED | - | - |\n",
+                results[i].scenario.name);
+    }
 
-    printf("\n### Summary\n\n");
-    printf("| Metric | Reference | CPU | CPU result |\n");
-    printf("|:--|--:|--:|:--|\n");
-    printf("| Median wall time | %.3f ms | %.3f ms | **%s** |\n",
-           reference * 1000.0, cpu * 1000.0, change);
-    printf("| Game-tick throughput | %s | %s | %.4fx |\n",
-           reference_gt_text, cpu_gt_text, cpu_gt / reference_gt);
-    printf("| Module throughput | %s | %s | %.4fx |\n",
-           reference_modules_text, cpu_modules_text,
-           cpu_modules / reference_modules);
-    printf("| Median paired speedup | - | - | **%.4fx** |\n", speedup);
+    report_printf(report, "\n## CPU backend\n\n");
+    report_printf(report, "| Scenario | Preparation | Computed | Cache hits | Fallbacks | Break-even |\n");
+    report_printf(report, "|:--|--:|--:|--:|--:|--:|\n");
+    for (size_t i = 0; i < count; ++i) {
+        char computed[32], hits[32], fallbacks[32], break_even[32];
+        format_count(computed, sizeof(computed), results[i].cpu_stats.cpu_evaluations);
+        format_count(hits, sizeof(hits), results[i].cpu_stats.cpu_cache_hits);
+        format_count(fallbacks, sizeof(fallbacks), results[i].cpu_stats.cpu_fallbacks);
+        if (results[i].cpu_seconds < results[i].reference_seconds)
+            snprintf(break_even, sizeof(break_even), "%.2f windows",
+                results[i].prepare_seconds /
+                (results[i].reference_seconds - results[i].cpu_seconds));
+        else
+            snprintf(break_even, sizeof(break_even), "not reached");
+        report_printf(report, "| `%s` | %.3f ms | %s | %s | **%s** | %s |\n",
+            results[i].scenario.name, results[i].prepare_seconds * 1000.0,
+            computed, hits, fallbacks, break_even);
+    }
 
-    char evaluations[32], hits[32], fallbacks[32], neighbor_checks[32];
-    char wires[32], wire_changes[32], events[32], pending[32];
-    format_count(evaluations, sizeof(evaluations), cpu_stats.cpu_evaluations);
-    format_count(hits, sizeof(hits), cpu_stats.cpu_cache_hits);
-    format_count(fallbacks, sizeof(fallbacks), cpu_stats.cpu_fallbacks);
-    format_count(neighbor_checks, sizeof(neighbor_checks), cpu_stats.neighbor_checks);
-    format_count(wires, sizeof(wires), cpu_stats.wires_visited);
-    format_count(wire_changes, sizeof(wire_changes), cpu_stats.wire_changes);
-    format_count(events, sizeof(events), cpu_stats.events_processed);
-    format_count(pending, sizeof(pending), cpu_stats.pending_events);
-    double successful_queries = (double)cpu_stats.cpu_evaluations +
-                                cpu_stats.cpu_cache_hits;
-    double hit_rate = successful_queries ?
-        100.0 * cpu_stats.cpu_cache_hits / successful_queries : 0.0;
-    printf("\n### CPU backend details\n\n");
-    printf("| Metric | Value |\n");
-    printf("|:--|--:|\n");
-    printf("| Plan preparation | %.3f ms |\n", prepare * 1000.0);
-    printf("| Computed queries | %s |\n", evaluations);
-    printf("| Cache hits | %s (%.2f%% hit rate) |\n", hits, hit_rate);
-    printf("| Fallback queries | **%s** |\n", fallbacks);
-    if (cpu < reference)
-        printf("| Preparation break-even | %.2f measured windows |\n",
-               prepare / (reference - cpu));
-    else
-        printf("| Preparation break-even | Not reached; CPU runtime is slower |\n");
+    report_printf(report, "\n## Simulation work\n\n");
+    report_printf(report, "| Scenario | Neighbor checks | Wires visited | Wire changes | Events | Pending |\n");
+    report_printf(report, "|:--|--:|--:|--:|--:|--:|\n");
+    for (size_t i = 0; i < count; ++i) {
+        char neighbors[32], wires[32], changes[32], events[32], pending[32];
+        format_count(neighbors, sizeof(neighbors), results[i].cpu_stats.neighbor_checks);
+        format_count(wires, sizeof(wires), results[i].cpu_stats.wires_visited);
+        format_count(changes, sizeof(changes), results[i].cpu_stats.wire_changes);
+        format_count(events, sizeof(events), results[i].cpu_stats.events_processed);
+        format_count(pending, sizeof(pending), results[i].cpu_stats.pending_events);
+        report_printf(report, "| `%s` | %s | %s | %s | %s | %s |\n",
+            results[i].scenario.name, neighbors, wires, changes, events, pending);
+    }
 
-    printf("\n### Work performed\n\n");
-    printf("| Neighbor checks | Wires visited | Wire changes | Events processed | Pending events |\n");
-    printf("|--:|--:|--:|--:|--:|\n");
-    printf("| %s | %s | %s | %s | %s |\n",
-           neighbor_checks, wires, wire_changes, events, pending);
+    bool warned = false;
+    for (size_t i = 0; i < count; ++i) warned |= results[i].short_runtime;
+    if (warned)
+        report_printf(report, "\n> **Timing note:** one or more median runtimes are below "
+                      "0.25 seconds; use the full profile for stable records.\n");
 
-    printf("\n### Machine-readable result\n\n");
-    printf("RESULT cell=%s width=%u depth=%u modules=%llu ticks=%u period=%u "
-           "pattern=%s seed=%llu rounds=%u verify=%s platform=%s "
-           "reference_seconds=%.9f cpu_seconds=%.9f speedup=%.6f "
-           "reference_gt_per_second=%.3f cpu_gt_per_second=%.3f "
-           "reference_module_gt_per_second=%.3f cpu_module_gt_per_second=%.3f "
-           "cpu_prepare_seconds=%.9f cpu_evaluations=%llu cpu_cache_hits=%llu "
-           "cpu_fallbacks=%llu neighbor_checks=%llu wires_visited=%llu "
-           "wire_changes=%llu events_processed=%llu pending_events=%zu\n",
-        cell_name(config.cell), config.width, config.depth,
-        (unsigned long long)((uint64_t)config.width * config.depth),
-        config.ticks, config.period, pattern_name(config.pattern),
-        (unsigned long long)config.seed, config.rounds,
-        config.verify ? "yes" : "no", platform_name(),
-        reference, cpu, speedup,
-        config.ticks / reference, config.ticks / cpu,
-        module_ticks / reference, module_ticks / cpu, prepare,
-        (unsigned long long)cpu_stats.cpu_evaluations,
-        (unsigned long long)cpu_stats.cpu_cache_hits,
-        (unsigned long long)cpu_stats.cpu_fallbacks,
-        (unsigned long long)cpu_stats.neighbor_checks,
-        (unsigned long long)cpu_stats.wires_visited,
-        (unsigned long long)cpu_stats.wire_changes,
-        (unsigned long long)cpu_stats.events_processed,
-        cpu_stats.pending_events);
+    if (options->verbose) {
+        report_printf(report, "\n## Timed pairs\n");
+        for (size_t i = 0; i < count; ++i) {
+            const Config *config = &results[i].scenario.config;
+            report_printf(report, "\n### `%s`\n\n", results[i].scenario.name);
+            report_printf(report, "| Pair | Reference | CPU | Speedup | Preparation |\n");
+            report_printf(report, "|--:|--:|--:|--:|--:|\n");
+            for (uint32_t round = 0; round < config->rounds; ++round)
+                report_printf(report, "| %u | %.3f ms | %.3f ms | %.4fx | %.3f ms |\n",
+                    round + 1, results[i].reference_rounds[round] * 1000.0,
+                    results[i].cpu_rounds[round] * 1000.0,
+                    results[i].speedup_rounds[round],
+                    results[i].prepare_rounds[round] * 1000.0);
+        }
+    }
 
-    free(reference_times);
-    free(cpu_times);
-    free(prepare_times);
-    free(speedups);
+    report_printf(report, "\n## Machine-readable results\n\n```text\n");
+    for (size_t i = 0; i < count; ++i) {
+        const Config *config = &results[i].scenario.config;
+        double module_ticks = (double)config->width * config->depth * config->ticks;
+        report_printf(report,
+            "RESULT scenario=%s cell=%s width=%u depth=%u modules=%llu ticks=%u "
+            "period=%u pattern=%s seed=%llu rounds=%u verify=%s platform=%s "
+            "reference_seconds=%.9f cpu_seconds=%.9f speedup=%.6f "
+            "reference_gt_per_second=%.3f cpu_gt_per_second=%.3f "
+            "reference_module_gt_per_second=%.3f cpu_module_gt_per_second=%.3f "
+            "cpu_prepare_seconds=%.9f cpu_evaluations=%llu cpu_cache_hits=%llu "
+            "cpu_fallbacks=%llu neighbor_checks=%llu wires_visited=%llu "
+            "wire_changes=%llu events_processed=%llu pending_events=%zu\n",
+            results[i].scenario.name, cell_name(config->cell), config->width,
+            config->depth,
+            (unsigned long long)((uint64_t)config->width * config->depth),
+            config->ticks, config->period, pattern_name(config->pattern),
+            (unsigned long long)config->seed, config->rounds,
+            config->verify ? "yes" : "no", platform_name(),
+            results[i].reference_seconds, results[i].cpu_seconds,
+            results[i].paired_speedup,
+            config->ticks / results[i].reference_seconds,
+            config->ticks / results[i].cpu_seconds,
+            module_ticks / results[i].reference_seconds,
+            module_ticks / results[i].cpu_seconds,
+            results[i].prepare_seconds,
+            (unsigned long long)results[i].cpu_stats.cpu_evaluations,
+            (unsigned long long)results[i].cpu_stats.cpu_cache_hits,
+            (unsigned long long)results[i].cpu_stats.cpu_fallbacks,
+            (unsigned long long)results[i].cpu_stats.neighbor_checks,
+            (unsigned long long)results[i].cpu_stats.wires_visited,
+            (unsigned long long)results[i].cpu_stats.wire_changes,
+            (unsigned long long)results[i].cpu_stats.events_processed,
+            results[i].cpu_stats.pending_events);
+    }
+    report_printf(report, "SUITE_RESULT profile=%s scenarios=%zu verify=%s\n```\n",
+                  profile, count, options->verify ? "yes" : "no");
+}
+
+int main(int argc, char **argv)
+{
+    Options options;
+    if (!parse_options(argc, argv, &options)) {
+        usage(argv[0]);
+        return 2;
+    }
+
+    Scenario selected[sizeof(scenarios) / sizeof(scenarios[0])];
+    size_t selected_count = 0;
+    if (options.mode == RUN_SUITE) {
+        selected_count = sizeof(scenarios) / sizeof(scenarios[0]);
+        memcpy(selected, scenarios, sizeof(scenarios));
+    } else if (options.mode == RUN_SCENARIO) {
+        const Scenario *scenario = find_scenario(options.scenario_name);
+        if (!scenario) {
+            fprintf(stderr, "unknown scenario: %s\n", options.scenario_name);
+            list_scenarios();
+            return 2;
+        }
+        selected[selected_count++] = *scenario;
+    } else {
+        selected[selected_count++] = (Scenario){
+            "custom", "Custom workload", options.custom
+        };
+    }
+
+    for (size_t i = 0; i < selected_count; ++i) {
+        apply_options(&selected[i], &options);
+        if (!validate_config(&selected[i].config)) return 2;
+    }
+
+    BenchmarkResult results[sizeof(scenarios) / sizeof(scenarios[0])];
+    for (size_t i = 0; i < selected_count; ++i)
+        if (!run_scenario(&selected[i], i, selected_count, &results[i])) return 1;
+
+    FILE *report_file = NULL;
+    if (options.write_report) {
+        report_file = fopen(options.output_path, "w");
+        if (!report_file) {
+            fprintf(stderr, "cannot write benchmark report: %s\n", options.output_path);
+            return 1;
+        }
+    }
+    Report report = {.copy = report_file};
+    write_report(&report, results, selected_count, &options);
+    fflush(stdout);
+    if (report_file && fclose(report_file) != 0) {
+        fprintf(stderr, "cannot finish benchmark report: %s\n", options.output_path);
+        return 1;
+    }
+    if (options.write_report)
+        fprintf(stderr, "Benchmark report written to %s\n", options.output_path);
     return 0;
 }

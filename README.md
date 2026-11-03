@@ -103,31 +103,36 @@ overhead depend on the circuit, so enable this explicitly when measuring it.
 
 ## Redstone scaling benchmark
 
-`./nob benchmark` builds a deterministic vanilla-redstone workload and runs
-the same fixed number of game ticks with the reference and CPU query backends.
-The default repeater matrix uses width as independent parallel lanes and depth
-as physically connected serial stages. A wide, shallow matrix stresses
-throughput; a narrow, deep matrix stresses propagation latency. The saved CSA
-cell is also available as an independent parallel bank with `--cell csa`.
+`./nob benchmark` runs the complete maintained benchmark suite with one
+command. The suite covers balanced, extremely parallel, extremely serial and
+sparse repeater layouts plus random and dense banks of the saved CSA cell. It
+prints one consolidated Markdown report and also writes the clean report to
+`build/benchmark-report.md`; build logs and progress remain outside that file.
 
-For example:
+Useful modes:
 
 ```sh
-./nob benchmark --width 4096 --depth 1 --ticks 4096 --rounds 7
-./nob benchmark --width 1 --depth 4096 --ticks 4096 --rounds 7
-./nob benchmark --width 64 --depth 64 --ticks 4096 --rounds 7
-./nob benchmark --cell csa --width 256 --depth 1 --ticks 4096 --rounds 7
+./nob benchmark
+./nob benchmark --quick
+./nob benchmark --scenario csa-dense
+./nob benchmark --scenario csa-random --verbose
+./nob benchmark --list-scenarios
 ```
 
-Inputs use a fixed seed and one of `dense`, `sparse` or `random` patterns.
+The full profile is intended for performance records; `--quick` runs the same
+scenario matrix with shorter durations and three timed pairs as a smoke test.
+`--rounds N`, `--seed N`, `--no-verify`, `--output PATH` and `--no-output`
+apply to the selected suite. Supplying `--cell`, `--width`, `--depth`,
+`--ticks`, `--period` or `--pattern` selects a custom single workload, so the
+older parameterized workflow remains available.
+
 Unless `--no-verify` is supplied, an untimed pass compares every output and
-the ordered state-write trace after every game tick. Plan preparation is
-reported separately from measured execution. CPU results are rejected if the
-plan becomes inactive or any query falls back to the reference path. The
-terminal report uses Markdown tables so the complete result can be pasted
-directly into a GitHub commit, pull request or issue. Its final `RESULT` line
-remains machine-readable. Record the commit and command with that report;
-generated worlds and timing files are build artifacts and are not committed.
+the ordered state-write trace after every game tick for every scenario. Plan
+preparation is reported separately from measured execution. CPU results are
+rejected if the plan becomes inactive or any query falls back to the reference
+path. The report contains consolidated performance, correctness, backend and
+simulation-work tables followed by one machine-readable `RESULT` line per
+scenario. Add `--verbose` only when individual timed pairs are needed.
 
 ## References
 
