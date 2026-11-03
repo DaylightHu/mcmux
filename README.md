@@ -16,6 +16,7 @@ Use a C compiler to compile `nob.c` into the `nob` build runner. Then run the
 | `./nob gui` | Build the GUI. |
 | `./nob run` | Build and launch the GUI. |
 | `./nob reader` | Build the standalone `.mcs` structure reader. |
+| `./nob benchmark` | Run the deterministic redstone scaling benchmark. |
 | `./nob vendor-list` | List the vendored raylib files required by the build. |
 | `./nob precommit` | Stage the required raylib files and verify an index-only build. |
 | `./nob clean` | Remove build outputs. |
@@ -99,6 +100,34 @@ the plan conservatively. Backend selection is per world and is not saved.
 `cpu_fallbacks`. Only the selected query path executes; runtime comparison
 against the reference backend is not required. Preparation time and runtime
 overhead depend on the circuit, so enable this explicitly when measuring it.
+
+## Redstone scaling benchmark
+
+`./nob benchmark` builds a deterministic vanilla-redstone workload and runs
+the same fixed number of game ticks with the reference and CPU query backends.
+The default repeater matrix uses width as independent parallel lanes and depth
+as physically connected serial stages. A wide, shallow matrix stresses
+throughput; a narrow, deep matrix stresses propagation latency. The saved CSA
+cell is also available as an independent parallel bank with `--cell csa`.
+
+For example:
+
+```sh
+./nob benchmark --width 4096 --depth 1 --ticks 4096 --rounds 7
+./nob benchmark --width 1 --depth 4096 --ticks 4096 --rounds 7
+./nob benchmark --width 64 --depth 64 --ticks 4096 --rounds 7
+./nob benchmark --cell csa --width 256 --depth 1 --ticks 4096 --rounds 7
+```
+
+Inputs use a fixed seed and one of `dense`, `sparse` or `random` patterns.
+Unless `--no-verify` is supplied, an untimed pass compares every output and
+the ordered state-write trace after every game tick. Plan preparation is
+reported separately from measured execution. CPU results are rejected if the
+plan becomes inactive or any query falls back to the reference path. The
+terminal report uses Markdown tables so the complete result can be pasted
+directly into a GitHub commit, pull request or issue. Its final `RESULT` line
+remains machine-readable. Record the commit and command with that report;
+generated worlds and timing files are build artifacts and are not committed.
 
 ## References
 

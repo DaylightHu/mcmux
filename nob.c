@@ -956,6 +956,18 @@ static bool build_headless_tool(const char *source, const char *name, bool run)
     return true;
 }
 
+static bool run_redstone_benchmark(int argc, char **argv)
+{
+    if (!build_headless_tool("benchmarks/redstone_scaling.c",
+                             "redstone_scaling", false)) return false;
+    Nob_Cmd command = {0};
+    nob_cmd_append(&command,
+        nob_temp_sprintf("build/redstone_scaling%s", executable_suffix()));
+    for (int index = 0; index < argc; ++index)
+        nob_cmd_append(&command, argv[index]);
+    return nob_cmd_run(&command);
+}
+
 static void print_help(const char *program)
 {
     printf("Usage: %s [command]\n\n", program);
@@ -967,6 +979,7 @@ static void print_help(const char *program)
     printf("  precommit    Stage the exact raylib set and verify an index-only build\n");
     printf("  test         Build and run the structure persistence tests\n");
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
+    printf("  benchmark    Run the deterministic redstone scaling benchmark\n");
     printf("  lib          Build build/libmcmux.a (no GUI dependencies)\n");
     printf("  build-c FILE Build a user C program linked with the simulation core\n");
     printf("  run-c FILE   Build and run a user C program from the repository root\n");
@@ -985,6 +998,8 @@ int main(int argc, char **argv)
         return build_headless_tool("tests/structure_test.c","structure_test",true) ? 0 : 1;
     if (strcmp(command,"reader")==0)
         return build_headless_tool("tools/inspect_structure.c","inspect_structure",false) ? 0 : 1;
+    if (strcmp(command,"benchmark")==0)
+        return run_redstone_benchmark(argc, argv) ? 0 : 1;
     if (strcmp(command,"lib")==0) return build_core_library() ? 0 : 1;
     if (strcmp(command,"build-c")==0 || strcmp(command,"run-c")==0) {
         if (argc!=1) {
