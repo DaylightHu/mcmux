@@ -28,6 +28,10 @@ typedef struct {
     TickFn scheduled_tick;
 } BlockDef;
 const BlockDef *block_definition(BlockId id);
+/* Pure native output rule. Dust connections must already be resolved for the
+ * current topology. Conductor relay is handled separately by the caller. */
+uint8_t block_state_signal(BlockState state, Direction face, SignalMode mode,
+                           bool direct);
 extern const BlockDef rs_iron_def, rs_redstone_block_def, rs_wire_def, rs_torch_def,
                       rs_glass_def, rs_repeater_def, rs_comparator_def,
                       rs_powered_rail_def, rs_activator_rail_def,

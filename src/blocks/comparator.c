@@ -97,11 +97,7 @@ bool comparator_should_turn_on(const World *world, BlockPos position,
 static uint8_t comparator_signal(const World *world, BlockPos position,
                                  Direction face, SignalMode mode)
 {
-    (void)mode;
-    BlockState state = world_get(world, position);
-    return state.data.comparator.powered &&
-           face == (Direction)state.data.comparator.facing ?
-           state.data.comparator.output : 0;
+    return block_state_signal(world_get(world, position), face, mode, false);
 }
 
 static bool comparator_should_prioritize(const World *world,

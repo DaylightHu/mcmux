@@ -32,15 +32,14 @@ static bool input_powered(const World *world, BlockPos position)
 static uint8_t torch_signal(const World *world, BlockPos position,
                             Direction face, SignalMode mode)
 {
-    (void)mode;
-    BlockState state = world_get(world, position);
-    return state.data.torch.lit && face != (Direction)state.data.torch.support_dir ? 15 : 0;
+    return block_state_signal(world_get(world, position), face, mode, false);
 }
 
 static uint8_t torch_direct(const World *world, BlockPos position,
                             Direction face, SignalMode mode)
 {
-    return face == DIR_UP ? torch_signal(world, position, face, mode) : 0;
+    return face == DIR_UP ?
+           block_state_signal(world_get(world, position), face, mode, true) : 0;
 }
 
 void torch_check_input(World *world, BlockPos position)

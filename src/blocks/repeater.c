@@ -68,10 +68,7 @@ static bool repeater_should_prioritize(const World *world, BlockPos position,
 static uint8_t repeater_signal(const World *world, BlockPos position,
                                Direction face, SignalMode mode)
 {
-    (void)mode;
-    BlockState state = world_get(world, position);
-    return state.data.repeater.powered &&
-           face == (Direction)state.data.repeater.facing ? 15 : 0;
+    return block_state_signal(world_get(world, position), face, mode, false);
 }
 
 void repeater_check_input(World *world, BlockPos position)

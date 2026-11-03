@@ -135,9 +135,9 @@ static uint8_t wire_signal(const World *world, BlockPos position,
     }
     BlockState state = world_get(world, position);
     if (!state.data.wire.power) return 0;
-    bool connected = face == DIR_DOWN ||
-        (wire_connection_state(world, position, state).data.wire.connections & FACE_BIT(face));
-    return connected ? state.data.wire.power : 0;
+    if (face != DIR_DOWN)
+        state = wire_connection_state(world, position, state);
+    return block_state_signal(state, face, mode, false);
 }
 
 static void wire_neighbor(World *world, BlockPos position)
