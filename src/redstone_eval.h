@@ -31,6 +31,9 @@ typedef struct {
 RsResult redstone_state_build(const RedstonePlan *plan, RedstoneState *state);
 void redstone_state_destroy(RedstoneState *state);
 
+/* Conservative compatibility check shared with live-plan invalidation. */
+bool redstone_state_compatible(BlockState initial, BlockState block);
+
 /* Change a supported block's state in this run only. Direction, attachment,
  * dust shape and block-type edits return RS_UNSUPPORTED: rebuild the plan.
  * This does not enqueue work; the executor must preserve each notification's

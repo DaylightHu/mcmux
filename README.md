@@ -80,6 +80,26 @@ belonging to that world can be stored beside the world file.
 
 The repository includes an example world at `saves/examples/`.
 
+## Optional CPU queries
+
+After loading or building a circuit, call
+`sim_use_cpu(world, min, max)` with inclusive region corners. This prepares a
+plan from the current blocks and enables cached input/target queries for dust,
+torches, repeaters and ordinary comparators. Actual notifications, delayed
+transitions and game-tick phases retain the existing simulation order.
+
+`sim_cpu_active(world)` reports whether the plan remains valid. Layout edits
+invalidate it; call `sim_use_cpu()` again to rebuild, or
+`sim_use_reference(world)` to release the plan. Unsupported queries, including
+container analog overrides and region boundaries, use reference queries.
+Other untracked revisions such as inventory or plot changes also invalidate
+the plan conservatively. Backend selection is per world and is not saved.
+
+`sim_stats(world)` includes `cpu_evaluations`, `cpu_cache_hits` and
+`cpu_fallbacks`. Only the selected query path executes; runtime comparison
+against the reference backend is not required. Preparation time and runtime
+overhead depend on the circuit, so enable this explicitly when measuring it.
+
 ## References
 
 - https://github.com/raysan5/raylib

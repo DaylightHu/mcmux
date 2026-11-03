@@ -77,6 +77,7 @@ struct Simulator {
     bool checking;
     bool frozen;
     bool updates_suppressed;
+    bool observing;
 };
 bool sim_init_internal(World *);
 void sim_destroy_internal(World *);

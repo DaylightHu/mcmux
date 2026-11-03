@@ -53,47 +53,69 @@ void redstone_state_destroy(RedstoneState *state)
     *state = (RedstoneState){0};
 }
 
+bool redstone_state_compatible(BlockState initial, BlockState block)
+{
+    StateId before, after;
+    if (block.id != initial.id || !state_encode(block, &after) ||
+        !state_encode(initial, &before)) return false;
+    switch ((BlockId)block.id) {
+    case BLOCK_REDSTONE_WIRE:
+        if (block.data.wire.connections != initial.data.wire.connections ||
+            block.data.wire.up_connections != initial.data.wire.up_connections ||
+            block.data.wire.prefer_dot != initial.data.wire.prefer_dot)
+            return false;
+        break;
+    case BLOCK_REDSTONE_TORCH:
+        if (block.data.torch.support_dir != initial.data.torch.support_dir)
+            return false;
+        break;
+    case BLOCK_REDSTONE_REPEATER:
+        if (block.data.repeater.facing != initial.data.repeater.facing)
+            return false;
+        break;
+    case BLOCK_REDSTONE_COMPARATOR:
+        if (block.data.comparator.facing != initial.data.comparator.facing)
+            return false;
+        break;
+    case BLOCK_OBSERVER:
+        if (block.data.observer.facing != initial.data.observer.facing)
+            return false;
+        break;
+    case BLOCK_LEVER:
+        if (block.data.lever.support_dir != initial.data.lever.support_dir ||
+            block.data.lever.facing != initial.data.lever.facing)
+            return false;
+        break;
+    case BLOCK_REDSTONE_LAMP:
+    case BLOCK_NOTE_BLOCK:
+    case BLOCK_BARREL:
+    case BLOCK_HOPPER:
+    case BLOCK_DROPPER:
+        /* These states have no native redstone output or changing support
+         * geometry. Runtime/analog evaluation still uses reference queries. */
+        break;
+    case BLOCK_POWERED_RAIL:
+    case BLOCK_ACTIVATOR_RAIL:
+        return initial.data.rail.facing == block.data.rail.facing &&
+               initial.data.rail.ascending == block.data.rail.ascending;
+    case BLOCK_PISTON:
+    case BLOCK_STICKY_PISTON:
+        return initial.data.piston.facing == block.data.piston.facing &&
+               initial.data.piston.extended == block.data.piston.extended;
+    default:
+        return before == after;
+    }
+    return true;
+}
+
 RsResult redstone_state_set(RedstoneState *state, RedstoneNodeId node,
                             BlockState block)
 {
     if (!valid_state(state, node)) return RS_INVALID_ARGUMENT;
     StateId before, after;
     if (!state_encode(block, &after)) return RS_INVALID_ARGUMENT;
-    BlockState initial = state->plan->nodes[node].initial_state;
-    if (block.id != initial.id) return RS_UNSUPPORTED;
-    switch ((BlockId)block.id) {
-    case BLOCK_REDSTONE_WIRE:
-        if (block.data.wire.connections != initial.data.wire.connections ||
-            block.data.wire.up_connections != initial.data.wire.up_connections ||
-            block.data.wire.prefer_dot != initial.data.wire.prefer_dot)
-            return RS_UNSUPPORTED;
-        break;
-    case BLOCK_REDSTONE_TORCH:
-        if (block.data.torch.support_dir != initial.data.torch.support_dir)
-            return RS_UNSUPPORTED;
-        break;
-    case BLOCK_REDSTONE_REPEATER:
-        if (block.data.repeater.facing != initial.data.repeater.facing)
-            return RS_UNSUPPORTED;
-        break;
-    case BLOCK_REDSTONE_COMPARATOR:
-        if (block.data.comparator.facing != initial.data.comparator.facing)
-            return RS_UNSUPPORTED;
-        break;
-    case BLOCK_OBSERVER:
-        if (block.data.observer.facing != initial.data.observer.facing)
-            return RS_UNSUPPORTED;
-        break;
-    case BLOCK_LEVER:
-        if (block.data.lever.support_dir != initial.data.lever.support_dir ||
-            block.data.lever.facing != initial.data.lever.facing)
-            return RS_UNSUPPORTED;
-        break;
-    default:
-        if (!state_encode(state->blocks[node], &before))
-            return RS_INTERNAL_ERROR;
-        return before == after ? RS_UNCHANGED : RS_UNSUPPORTED;
-    }
+    if (!redstone_state_compatible(state->plan->nodes[node].initial_state, block))
+        return RS_UNSUPPORTED;
     if (!state_encode(state->blocks[node], &before)) return RS_INTERNAL_ERROR;
     if (before == after) return RS_UNCHANGED;
     state->blocks[node] = block;

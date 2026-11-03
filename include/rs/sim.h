@@ -9,8 +9,24 @@ typedef struct {
     uint64_t rail_components_solved; /* Graph passes; zero for synchronous rails. */
     uint64_t rails_visited; /* Individual synchronous rail-state evaluations. */
     uint64_t rail_changes, events_processed;
+    uint64_t cpu_evaluations, cpu_cache_hits, cpu_fallbacks;
     size_t pending_events; /* Scheduled ticks, block events and active motions. */
 } SimStats;
+
+/* Opt in to CPU plan-based input/target queries for this inclusive region.
+ * The initial state and pending events are preserved. Call between actions,
+ * not from observers, ticks or checks. On failure the previous backend stays
+ * selected. Unsupported queries use the reference algorithm individually.
+ * Layout edits or untracked world revisions invalidate the plan before any
+ * further queries; execution then uses reference queries until sim_use_cpu()
+ * builds a new plan. Active piston motion is not supported at plan creation.
+ * Selection is per world, is not saved, and never changes game-tick ordering. */
+RsResult sim_use_cpu(World *world, BlockPos min, BlockPos max);
+RsResult sim_use_reference(World *world);
+/* True only while a CPU plan is valid. False for reference mode or an
+ * invalidated plan. Read SimStats to distinguish computed/cached/fallback
+ * queries; these counters are cleared by sim_reset_stats(). */
+bool sim_cpu_active(const World *world);
 typedef struct {
     uint8_t received;  /* Any incident signal, e.g. dust can turn off a torch. */
     uint8_t strong;    /* Direct signal with ALL wire outputs suppressed. */

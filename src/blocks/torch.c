@@ -1,5 +1,6 @@
 #include "block_internal.h"
 #include "sim_internal.h"
+#include "sim_executor.h"
 
 enum {
     TORCH_DELAY = 2,
@@ -18,6 +19,9 @@ bool torch_supported(const World *world, BlockPos position, Direction support)
 static bool input_powered(const World *world, BlockPos position)
 {
     BlockState state = world_get(world, position);
+    RedstoneEvaluation value;
+    if (sim_executor_evaluate(world, position, state, &value) == RS_OK)
+        return value.input > 0;
     Direction support_dir = (Direction)state.data.torch.support_dir;
     BlockPos support = block_offset(position, support_dir);
 

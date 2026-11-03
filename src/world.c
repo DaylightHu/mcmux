@@ -3,6 +3,7 @@
 #endif
 #include "world_internal.h"
 #include "sim_internal.h"
+#include "sim_executor.h"
 #include "worldgen.h"
 #include <inttypes.h>
 #include <limits.h>
@@ -554,8 +555,14 @@ static bool world_write_state(World *w, BlockPos p, BlockState state,
     c->modified = true; c->archive_size = 0; ++w->revision;
     invalidate_reads(w, previous.id == BLOCK_REDSTONE_WIRE &&
                         state.id == BLOCK_REDSTONE_WIRE);
-    if (w->observer) w->observer(w->observer_context, p, previous, state);
-    return true;
+    sim_executor_stored(w, p, previous, state);
+    if (w->observer) {
+        bool observing = w->sim->observing;
+        w->sim->observing = true;
+        w->observer(w->observer_context, p, previous, state);
+        w->sim->observing = observing;
+    }
+    return w->sim->error == RS_OK;
 }
 bool world_write_derived(World *w, BlockPos p, BlockState state)
 {

@@ -1,5 +1,6 @@
 #include "block_internal.h"
 #include "sim_internal.h"
+#include "sim_executor.h"
 
 enum { COMPARATOR_DELAY = 2 };
 
@@ -76,6 +77,9 @@ static uint8_t comparator_side_input(const World *world, BlockPos position,
 uint8_t comparator_desired_output(const World *world, BlockPos position,
                                          BlockState state)
 {
+    RedstoneEvaluation value;
+    if (sim_executor_evaluate(world, position, state, &value) == RS_OK)
+        return value.target_power;
     uint8_t rear = comparator_rear_input(world, position, state);
     if (state.data.comparator.subtract) {
         uint8_t side = comparator_side_input(world, position, state);
@@ -88,6 +92,9 @@ uint8_t comparator_desired_output(const World *world, BlockPos position,
 bool comparator_should_turn_on(const World *world, BlockPos position,
                                 BlockState state)
 {
+    RedstoneEvaluation value;
+    if (sim_executor_evaluate(world, position, state, &value) == RS_OK)
+        return value.target_on;
     uint8_t rear = comparator_rear_input(world, position, state);
     if (!rear) return false;
     uint8_t side = comparator_side_input(world, position, state);

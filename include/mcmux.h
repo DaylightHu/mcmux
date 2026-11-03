@@ -81,6 +81,9 @@ void writeback_mcs(World *world, const char *mcs_path,
 // void world_clear_error(World *world);
 
 /* Read simulation statistics and world counters. */
+// RsResult sim_use_cpu(World *world, BlockPos min, BlockPos max);
+// RsResult sim_use_reference(World *world);
+// bool sim_cpu_active(const World *world);
 // SimStats sim_stats(const World *world);
 // uint64_t world_revision(const World *world);
 // size_t world_loaded_chunks(const World *world);
