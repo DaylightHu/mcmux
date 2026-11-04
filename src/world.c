@@ -74,6 +74,7 @@ static void invalidate_reads(World *w, bool wire_properties_only)
     if (!++w->read_cache_stamp) {
         memset(w->reads, 0, sizeof(w->reads));
         w->read_cache_stamp = 1;
+        w->recent_chunk_stamp = 0;
     }
     invalidate_wire_powers(w, wire_properties_only);
 }
@@ -511,7 +512,18 @@ BlockState world_get(const World *w, BlockPos p)
     WorldReadEntry *entry = &((World *)w)->reads[read_slot(p)];
     if (entry->stamp == w->read_cache_stamp && pos_equal(entry->pos, p))
         return entry->state;
-    Chunk *c = world_find_chunk(w, chunk_key(p));
+    BlockPos key = chunk_key(p);
+    World *mutable = (World *)w;
+    Chunk *c;
+    if (w->recent_chunk_stamp == w->read_cache_stamp &&
+        pos_equal(w->recent_chunk_key, key)) {
+        c = w->recent_chunk;
+    } else {
+        c = world_find_chunk(w, key);
+        mutable->recent_chunk_key = key;
+        mutable->recent_chunk = c;
+        mutable->recent_chunk_stamp = w->read_cache_stamp;
+    }
     if (!c) {
         BlockState state = world_generated_state(w, p);
         *entry = (WorldReadEntry){p, state, w->read_cache_stamp};
