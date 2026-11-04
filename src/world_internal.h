@@ -28,7 +28,7 @@ struct World {
     Simulator *sim;
     WorldChangeObserver observer;
     void *observer_context;
-    uint64_t read_stamp, external_power_stamp;
+    uint64_t read_stamp, read_cache_stamp, external_power_stamp;
     WorldReadEntry reads[WORLD_READ_CACHE_SIZE];
     WirePowerEntry wire_powers[WORLD_READ_CACHE_SIZE];
     RsResult action_error;
