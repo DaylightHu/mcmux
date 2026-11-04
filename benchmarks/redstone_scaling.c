@@ -6,12 +6,21 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef MCMUX_BENCHMARK_C
+#include "benchmark-c-models.h"
+static const SimCModel *selected_c_model;
+static const char *backend_name = "compiled C";
+#else
+static const char *backend_name = "CPU queries";
+#endif
 
 typedef enum {
     CELL_REPEATER,
@@ -71,6 +80,8 @@ typedef struct {
     RunMode mode;
     const char *scenario_name;
     const char *output_path;
+    const char *emit_c_path;
+    double c_build_seconds;
     Config custom;
     uint32_t rounds_override;
     uint64_t seed;
@@ -175,6 +186,7 @@ static void usage(const char *program)
     printf("  --verbose            Include every timed pair in the report\n");
     printf("  --output PATH        Report path (default: build/benchmark-report.md)\n");
     printf("  --no-output          Print only; do not save a report file\n\n");
+    printf("  --emit-c PATH        Export selected query models instead of timing\n\n");
     printf("Custom workload options (select custom mode automatically):\n");
     printf("  --cell repeater|csa  Circuit cell (default: repeater)\n");
     printf("  --width N            Parallel lanes/cells (default: 64)\n");
@@ -292,6 +304,16 @@ static bool parse_options(int argc, char **argv, Options *options)
             if (!option_value(argc, argv, &i, &value)) return false;
             options->output_path = value;
             options->write_report = true;
+        } else if (strcmp(argv[i], "--emit-c") == 0) {
+            if (!option_value(argc, argv, &i, &value)) return false;
+            options->emit_c_path = value;
+        } else if (strcmp(argv[i], "--c-build-seconds") == 0) {
+            if (!option_value(argc, argv, &i, &value)) return false;
+            char *end;
+            errno = 0;
+            options->c_build_seconds = strtod(value, &end);
+            if (errno || end == value || *end || !isfinite(options->c_build_seconds) ||
+                options->c_build_seconds < 0) return false;
         } else if (strcmp(argv[i], "--scenario") == 0) {
             if (!option_value(argc, argv, &i, &value)) return false;
             options->mode = RUN_SCENARIO;
@@ -699,6 +721,25 @@ static void trace_write(void *context, BlockPos pos,
     ++trace->count;
 }
 
+static RsResult select_backend(Fixture *fixture)
+{
+#ifdef MCMUX_BENCHMARK_C
+    return sim_use_c(fixture->world, fixture->min, fixture->max, selected_c_model);
+#else
+    return sim_use_cpu(fixture->world, fixture->min, fixture->max);
+#endif
+}
+
+static bool generated_queries_ran(const World *world)
+{
+#ifdef MCMUX_BENCHMARK_C
+    return sim_c_active(world) && sim_stats(world).c_evaluations > 0;
+#else
+    (void)world;
+    return true;
+#endif
+}
+
 static bool verify_equivalence(const Config *config, VerifyResult *verification)
 {
     Fixture reference = {0}, cpu = {0};
@@ -709,7 +750,7 @@ static bool verify_equivalence(const Config *config, VerifyResult *verification)
         goto done;
     if (reference.input_count != cpu.input_count ||
         reference.output_count != cpu.output_count) goto done;
-    RsResult backend = sim_use_cpu(cpu.world, cpu.min, cpu.max);
+    RsResult backend = select_backend(&cpu);
     if (backend != RS_OK) {
         fprintf(stderr, "CPU setup failed during verification: %s\n",
                 rs_result_name(backend));
@@ -771,6 +812,10 @@ static bool verify_equivalence(const Config *config, VerifyResult *verification)
             (unsigned long long)sim_stats(cpu.world).cpu_fallbacks);
         goto done;
     }
+    if (!generated_queries_ran(cpu.world)) {
+        fprintf(stderr, "generated C queries did not execute during verification\n");
+        goto done;
+    }
     verification->writes = reference_trace.count;
     verification->digest = output_digest(&reference);
     ok = true;
@@ -792,7 +837,7 @@ static bool timed_run(const Config *config, bool use_cpu, RunResult *result)
     if (!fixture_build(config, &fixture)) goto done;
     if (use_cpu) {
         double start = runtime_clock_now();
-        RsResult backend = sim_use_cpu(fixture.world, fixture.min, fixture.max);
+        RsResult backend = select_backend(&fixture);
         result->prepare_seconds = runtime_clock_now() - start;
         if (backend != RS_OK) {
             fprintf(stderr, "CPU setup failed: %s\n", rs_result_name(backend));
@@ -828,6 +873,10 @@ static bool timed_run(const Config *config, bool use_cpu, RunResult *result)
     if (use_cpu && result->stats.cpu_fallbacks) {
         fprintf(stderr, "CPU workload used %llu fallback queries; refusing the score\n",
             (unsigned long long)result->stats.cpu_fallbacks);
+        goto done;
+    }
+    if (use_cpu && !generated_queries_ran(fixture.world)) {
+        fprintf(stderr, "generated C queries did not execute during timing\n");
         goto done;
     }
     ok = true;
@@ -896,6 +945,11 @@ static void apply_options(Scenario *scenario, const Options *options)
 static bool run_scenario(const Scenario *scenario, size_t index, size_t count,
                          BenchmarkResult *result)
 {
+#ifdef MCMUX_BENCHMARK_C
+    if (index >= sizeof(mcmux_benchmark_models)/sizeof(*mcmux_benchmark_models))
+        return false;
+    selected_c_model = mcmux_benchmark_models[index];
+#endif
     const Config *config = &scenario->config;
     *result = (BenchmarkResult){.scenario = *scenario};
     if (config->verify) {
@@ -993,6 +1047,11 @@ static void write_report(Report *report, const BenchmarkResult *results,
     report_printf(report, "| Environment | Value |\n|:--|:--|\n");
     report_printf(report, "| Profile | `%s` |\n", profile);
     report_printf(report, "| Scenarios | %zu |\n", count);
+    report_printf(report, "| CPU implementation | %s |\n", backend_name);
+#ifdef MCMUX_BENCHMARK_C
+    report_printf(report, "| AOT generation | %.6f s |\n", mcmux_c_generation_seconds);
+    report_printf(report, "| AOT compile + link | %.6f s |\n", options->c_build_seconds);
+#endif
     report_printf(report, "| Platform | `%s` |\n", platform_name());
     report_printf(report, "| Compiler | `%s` |\n",
 #ifdef __VERSION__
@@ -1045,6 +1104,16 @@ static void write_report(Report *report, const BenchmarkResult *results,
     }
 
     report_printf(report, "\n## CPU backend\n\n");
+#ifdef MCMUX_BENCHMARK_C
+    report_printf(report, "Generated C uses the same cache and runtime as CPU queries. "
+        "Preparation below is model attachment only; break-even excludes AOT generation "
+        "and compilation (reported above).\n\n");
+    report_printf(report, "| Scenario | Generated query evaluations |\n|:--|--:|\n");
+    for (size_t i = 0; i < count; ++i)
+        report_printf(report, "| `%s` | %llu |\n", results[i].scenario.name,
+            (unsigned long long)results[i].cpu_stats.c_evaluations);
+    report_printf(report, "\n");
+#endif
     report_printf(report, "| Scenario | Preparation | Computed | Cache hits | Fallbacks | Break-even |\n");
     report_printf(report, "|:--|--:|--:|--:|--:|--:|\n");
     for (size_t i = 0; i < count; ++i) {
@@ -1111,7 +1180,8 @@ static void write_report(Report *report, const BenchmarkResult *results,
             "reference_module_gt_per_second=%.3f cpu_module_gt_per_second=%.3f "
             "cpu_prepare_seconds=%.9f cpu_evaluations=%llu cpu_cache_hits=%llu "
             "cpu_fallbacks=%llu neighbor_checks=%llu wires_visited=%llu "
-            "wire_changes=%llu events_processed=%llu pending_events=%zu\n",
+            "wire_changes=%llu events_processed=%llu pending_events=%zu "
+            "c_evaluations=%llu\n",
             results[i].scenario.name, cell_name(config->cell), config->width,
             config->depth,
             (unsigned long long)((uint64_t)config->width * config->depth),
@@ -1132,7 +1202,8 @@ static void write_report(Report *report, const BenchmarkResult *results,
             (unsigned long long)results[i].cpu_stats.wires_visited,
             (unsigned long long)results[i].cpu_stats.wire_changes,
             (unsigned long long)results[i].cpu_stats.events_processed,
-            results[i].cpu_stats.pending_events);
+            results[i].cpu_stats.pending_events,
+            (unsigned long long)results[i].cpu_stats.c_evaluations);
     }
     report_printf(report, "SUITE_RESULT profile=%s scenarios=%zu verify=%s\n```\n",
                   profile, count, options->verify ? "yes" : "no");
@@ -1168,6 +1239,35 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < selected_count; ++i) {
         apply_options(&selected[i], &options);
         if (!validate_config(&selected[i].config)) return 2;
+    }
+
+    if (options.emit_c_path) {
+        FILE *out = fopen(options.emit_c_path, "w");
+        if (!out) return 1;
+        bool ok = true;
+        double start = runtime_clock_now();
+        for (size_t i = 0; i < selected_count && ok; ++i) {
+            Fixture fixture = {0};
+            ok = fixture_build(&selected[i].config, &fixture);
+            if (ok) {
+                char symbol[64];
+                snprintf(symbol, sizeof(symbol), "mcmux_bench_%zu", i);
+                RsResult result = sim_write_c(fixture.world, fixture.min,
+                                               fixture.max, out, symbol);
+                ok = result == RS_OK;
+                if (!ok) fprintf(stderr, "C export failed: %s\n", rs_result_name(result));
+            }
+            fixture_destroy(&fixture);
+        }
+        double seconds = runtime_clock_now() - start;
+        fputs("\nstatic const SimCModel *const mcmux_benchmark_models[] = {\n", out);
+        for (size_t i = 0; i < selected_count; ++i)
+            fprintf(out, "    &mcmux_bench_%zu,\n", i);
+        fprintf(out, "};\nstatic const double mcmux_c_generation_seconds = %.9f;\n", seconds);
+        if (ferror(out)) ok = false;
+        if (fclose(out) != 0) ok = false;
+        if (!ok) (void)remove(options.emit_c_path);
+        return ok ? 0 : 1;
     }
 
     BenchmarkResult results[sizeof(scenarios) / sizeof(scenarios[0])];

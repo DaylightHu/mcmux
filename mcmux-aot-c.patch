@@ -1,0 +1,1651 @@
+From 3e352158f8250536dfc4726bc6d378f0e4a60054 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 3 Nov 2026 22:17:29 -0800
+Subject: [PATCH] Add experimental AOT C queries for fixed redstone topology
+
+Generate C11 input/target evaluators with constant state offsets and
+block-specific rules, then attach them to the existing CPU cache. Intern
+identical relative query bodies while keeping all instance state and events
+independent. Keep
+scheduled ticks, notifications, state commits and time in the existing
+runtime. Check complete query topology before attachment and retain explicit
+fallback and edit invalidation behavior.
+
+Add benchmark-c, test-c and MCS export-c workflows. Report AOT generation
+and compilation separately from simulation/attachment time, and require
+generated queries to execute without fallbacks in the benchmark.
+
+This is the first code-generation stage, not a standalone compiled
+simulator or CUDA backend. Regenerate models after changing the core.
+
+Base: 3d9b82c1c6b1d091fccab463c2afcf2502a4aa7d (PR #59)
+
+Validation:
+- ./nob test-c: query equivalence across 228224 evaluations, exact ordered
+  writes, pending events, mode/delay changes, backend switching, boundary
+  fallbacks, topology mismatch, empty models and edit invalidation.
+- build/redstone_scaling --quick --no-output: all six reference/CPU
+  scenarios pass with zero fallbacks.
+- ./nob benchmark-c --quick --no-output: all six reference/generated-C
+  scenarios pass with zero fallbacks and generated queries executed.
+- Generated MCS model compiles, links and executes via sim_use_c.
+- AddressSanitizer/UBSan on the new evaluator/attachment code and generated
+  test functions; leak detection disabled because the sandbox lacks /proc.
+---
+ README.md                     |  96 +++++++
+ benchmarks/redstone_scaling.c | 108 +++++++-
+ include/mcmux.h               |   1 +
+ include/rs/compiled.h         |  46 ++++
+ include/rs/sim.h              |   1 +
+ nob.c                         |  67 ++++-
+ src/redstone_c.c              | 484 ++++++++++++++++++++++++++++++++++
+ src/redstone_c.h              |   8 +
+ src/redstone_eval.h           |   6 +-
+ src/sim_executor.c            |  50 +++-
+ tests/c_codegen_test.c        | 373 ++++++++++++++++++++++++++
+ tools/export_c.c              |  49 ++++
+ 12 files changed, 1278 insertions(+), 11 deletions(-)
+ create mode 100644 include/rs/compiled.h
+ create mode 100644 src/redstone_c.c
+ create mode 100644 src/redstone_c.h
+ create mode 100644 tests/c_codegen_test.c
+ create mode 100644 tools/export_c.c
+
+diff --git a/README.md b/README.md
+index 2be6362..e500669 100644
+--- a/README.md
++++ b/README.md
+@@ -17,6 +17,9 @@ Use a C compiler to compile `nob.c` into the `nob` build runner. Then run the
+ | `./nob run` | Build and launch the GUI. |
+ | `./nob reader` | Build the standalone `.mcs` structure reader. |
+ | `./nob benchmark` | Run the deterministic redstone scaling benchmark. |
++| `./nob benchmark-c --quick` | Generate circuit-specific C queries, compile them, and run the benchmark suite. |
++| `./nob test-c` | Generate, compile and test the C query backend. |
++| `./nob export-c INPUT.mcs OUTPUT.c [SYMBOL]` | Export an MCS circuit as a C query model. |
+ | `./nob vendor-list` | List the vendored raylib files required by the build. |
+ | `./nob precommit` | Stage the required raylib files and verify an index-only build. |
+ | `./nob clean` | Remove build outputs. |
+@@ -101,6 +104,99 @@ the plan conservatively. Backend selection is per world and is not saved.
+ against the reference backend is not required. Preparation time and runtime
+ overhead depend on the circuit, so enable this explicitly when measuring it.
+ 
++## Experimental AOT C queries
++
++This first code-generation backend specializes **pure input/target queries**
++for the actual blocks in a fixed `RedstonePlan`. It emits C11 functions with
++constant state offsets, faces, attenuation and block-specific rules. Identical
++query bodies share compiled functions, with each call based at its target's
++own state. This shares code only; blocks and their events are never merged. Generated
++queries do not call the generic evaluator or traverse the topology at runtime.
++The existing CPU cache remains in use. All scheduled ticks, synchronous
++notifications, state writes, torch history and block entities still execute
++through the existing simulator runtime, in the same order. This is not yet a
++standalone compiled simulator, a parallel backend, or a CUDA implementation.
++
++Start with:
++
++```sh
++cc -O2 -o nob nob.c
++./nob test-c
++./nob benchmark-c --cell csa --width 8 --depth 1 --ticks 512 --period 8 --rounds 3
++./nob benchmark-c --quick
++```
++
++`benchmark-c` first exports the selected workloads to
++`build/benchmark-c-models.h`, then builds `build/redstone_scaling_aot` and runs
++the same per-tick output and ordered-write verification as `benchmark`.
++It rejects fallback queries and verifies that generated C actually executed.
++The `CPU implementation` row distinguishes generated C from ordinary CPU
++queries. Existing `cpu_*` result fields describe the accelerated path;
++`c_evaluations` is the subset of computed queries executed by generated C.
++Use the same scenario/options with `./nob benchmark` to measure the ordinary
++CPU path separately. The C and CPU paths both use caching.
++
++The report lists AOT generation and compile/link time separately. Timed runs
++exclude those costs; preparation/break-even measures attachment only. AOT
++generation includes fixture construction; compile/link includes rebuilding
++the core in the benchmark executable, but not building the exporter itself.
++Large circuits generate substantial code and may take a long time to compile;
++`--quick` reduces simulation duration, not circuit size or compilation work.
++No speedup is promised. Measure compilation amortization as well as runtime.
++The one-command workflow always regenerates models, so stale build files are
++never silently reused. Commands and compiler arguments are passed directly,
++without constructing shell commands in the simulation library.
++
++To export a saved structure at its original coordinates:
++
++```sh
++./nob export-c saves/examples/carry_save_cell.mcs build/circuit.c mcmux_circuit
++```
++
++The generated unit defines `const SimCModel mcmux_circuit`. Compile it alongside
++your host program and the core, or include it in your host source. It includes
++`rs/compiled.h`; use the same headers/compiler ABI as the core and regenerate
++after changing the core. For example, with a host program at `host.c`:
++
++```sh
++./nob lib
++cc -std=c11 -O2 -Iinclude host.c build/circuit.c build/libmcmux.a -lm -o build/host
++```
++
++The host declares `extern const SimCModel mcmux_circuit;`, loads the same world
++and calls `sim_use_c(world, min, max, &mcmux_circuit)` before driving inputs and
++using the existing tick API. `min` is `StructureInfo.origin`; `max` is origin
++plus `(width-1, height-1, length-1)` for `export-c` output. Attachment compares
++the complete query topology (including positions), so changing the export
++bounds or moving the circuit requires re-export. Power levels, repeater delay
++and comparator mode remain live state and may differ at attachment time.
++The generated code is trusted native code, not a serialized/untrusted model.
++Keep the descriptor, metadata and code alive and immutable while attached.
++
++For an already running world, `sim_write_c(world, min, max, stream, symbol)`
++exports without changing the selected backend, time, states or pending events.
++It borrows the output stream; check both its result and `fclose()`. Call between
++actions. `sim_use_c()` also runs between actions and retains the previous
++backend on failure. `sim_c_active()` checks model validity;
++`sim_use_reference()` detaches it. `sim_cpu_active()` is also true for a valid
++generated model because it uses the CPU plan's cache and invalidation rules.
++
++Unsupported queries (region boundaries, container analog overrides and runtime
++rules) explicitly fall back to the reference query path. Layout edits or
++untracked world revisions invalidate the model just like `sim_use_cpu()`;
++no model rebuild or recompilation happens implicitly. The benchmark insists
++on zero fallbacks, but arbitrary exported worlds may legitimately need them.
++Attach-time topology mismatch returns `RS_UNSUPPORTED`; malformed descriptors
++return `RS_INVALID_ARGUMENT`. Neither replaces a previously selected backend.
++
++`test-c` checks generated queries against the generic evaluator across 128
++state batches (including comparator modes, wire strengths and repeater power),
++then compares exact ordered writes, all fixture block states and pending
++scheduled events while toggling inputs, locking repeaters, changing modes and
++switching backends. It also tests mismatched topology, unsupported boundaries,
++empty models and edit invalidation. This verifies agreement with the existing
++reference implementation, not independent equivalence to vanilla Minecraft.
++
+ ## Redstone scaling benchmark
+ 
+ `./nob benchmark` runs the complete maintained benchmark suite with one
+diff --git a/benchmarks/redstone_scaling.c b/benchmarks/redstone_scaling.c
+index 9b4da27..36f0379 100644
+--- a/benchmarks/redstone_scaling.c
++++ b/benchmarks/redstone_scaling.c
+@@ -6,6 +6,7 @@
+ 
+ #include <errno.h>
+ #include <limits.h>
++#include <math.h>
+ #include <stdbool.h>
+ #include <stdarg.h>
+ #include <stdint.h>
+@@ -13,6 +14,14 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#ifdef MCMUX_BENCHMARK_C
++#include "benchmark-c-models.h"
++static const SimCModel *selected_c_model;
++static const char *backend_name = "compiled C";
++#else
++static const char *backend_name = "CPU queries";
++#endif
++
+ typedef enum {
+     CELL_REPEATER,
+     CELL_CSA
+@@ -71,6 +80,8 @@ typedef struct {
+     RunMode mode;
+     const char *scenario_name;
+     const char *output_path;
++    const char *emit_c_path;
++    double c_build_seconds;
+     Config custom;
+     uint32_t rounds_override;
+     uint64_t seed;
+@@ -175,6 +186,7 @@ static void usage(const char *program)
+     printf("  --verbose            Include every timed pair in the report\n");
+     printf("  --output PATH        Report path (default: build/benchmark-report.md)\n");
+     printf("  --no-output          Print only; do not save a report file\n\n");
++    printf("  --emit-c PATH        Export selected query models instead of timing\n\n");
+     printf("Custom workload options (select custom mode automatically):\n");
+     printf("  --cell repeater|csa  Circuit cell (default: repeater)\n");
+     printf("  --width N            Parallel lanes/cells (default: 64)\n");
+@@ -292,6 +304,16 @@ static bool parse_options(int argc, char **argv, Options *options)
+             if (!option_value(argc, argv, &i, &value)) return false;
+             options->output_path = value;
+             options->write_report = true;
++        } else if (strcmp(argv[i], "--emit-c") == 0) {
++            if (!option_value(argc, argv, &i, &value)) return false;
++            options->emit_c_path = value;
++        } else if (strcmp(argv[i], "--c-build-seconds") == 0) {
++            if (!option_value(argc, argv, &i, &value)) return false;
++            char *end;
++            errno = 0;
++            options->c_build_seconds = strtod(value, &end);
++            if (errno || end == value || *end || !isfinite(options->c_build_seconds) ||
++                options->c_build_seconds < 0) return false;
+         } else if (strcmp(argv[i], "--scenario") == 0) {
+             if (!option_value(argc, argv, &i, &value)) return false;
+             options->mode = RUN_SCENARIO;
+@@ -699,6 +721,25 @@ static void trace_write(void *context, BlockPos pos,
+     ++trace->count;
+ }
+ 
++static RsResult select_backend(Fixture *fixture)
++{
++#ifdef MCMUX_BENCHMARK_C
++    return sim_use_c(fixture->world, fixture->min, fixture->max, selected_c_model);
++#else
++    return sim_use_cpu(fixture->world, fixture->min, fixture->max);
++#endif
++}
++
++static bool generated_queries_ran(const World *world)
++{
++#ifdef MCMUX_BENCHMARK_C
++    return sim_c_active(world) && sim_stats(world).c_evaluations > 0;
++#else
++    (void)world;
++    return true;
++#endif
++}
++
+ static bool verify_equivalence(const Config *config, VerifyResult *verification)
+ {
+     Fixture reference = {0}, cpu = {0};
+@@ -709,7 +750,7 @@ static bool verify_equivalence(const Config *config, VerifyResult *verification)
+         goto done;
+     if (reference.input_count != cpu.input_count ||
+         reference.output_count != cpu.output_count) goto done;
+-    RsResult backend = sim_use_cpu(cpu.world, cpu.min, cpu.max);
++    RsResult backend = select_backend(&cpu);
+     if (backend != RS_OK) {
+         fprintf(stderr, "CPU setup failed during verification: %s\n",
+                 rs_result_name(backend));
+@@ -771,6 +812,10 @@ static bool verify_equivalence(const Config *config, VerifyResult *verification)
+             (unsigned long long)sim_stats(cpu.world).cpu_fallbacks);
+         goto done;
+     }
++    if (!generated_queries_ran(cpu.world)) {
++        fprintf(stderr, "generated C queries did not execute during verification\n");
++        goto done;
++    }
+     verification->writes = reference_trace.count;
+     verification->digest = output_digest(&reference);
+     ok = true;
+@@ -792,7 +837,7 @@ static bool timed_run(const Config *config, bool use_cpu, RunResult *result)
+     if (!fixture_build(config, &fixture)) goto done;
+     if (use_cpu) {
+         double start = runtime_clock_now();
+-        RsResult backend = sim_use_cpu(fixture.world, fixture.min, fixture.max);
++        RsResult backend = select_backend(&fixture);
+         result->prepare_seconds = runtime_clock_now() - start;
+         if (backend != RS_OK) {
+             fprintf(stderr, "CPU setup failed: %s\n", rs_result_name(backend));
+@@ -830,6 +875,10 @@ static bool timed_run(const Config *config, bool use_cpu, RunResult *result)
+             (unsigned long long)result->stats.cpu_fallbacks);
+         goto done;
+     }
++    if (use_cpu && !generated_queries_ran(fixture.world)) {
++        fprintf(stderr, "generated C queries did not execute during timing\n");
++        goto done;
++    }
+     ok = true;
+ 
+ done:
+@@ -896,6 +945,11 @@ static void apply_options(Scenario *scenario, const Options *options)
+ static bool run_scenario(const Scenario *scenario, size_t index, size_t count,
+                          BenchmarkResult *result)
+ {
++#ifdef MCMUX_BENCHMARK_C
++    if (index >= sizeof(mcmux_benchmark_models)/sizeof(*mcmux_benchmark_models))
++        return false;
++    selected_c_model = mcmux_benchmark_models[index];
++#endif
+     const Config *config = &scenario->config;
+     *result = (BenchmarkResult){.scenario = *scenario};
+     if (config->verify) {
+@@ -993,6 +1047,11 @@ static void write_report(Report *report, const BenchmarkResult *results,
+     report_printf(report, "| Environment | Value |\n|:--|:--|\n");
+     report_printf(report, "| Profile | `%s` |\n", profile);
+     report_printf(report, "| Scenarios | %zu |\n", count);
++    report_printf(report, "| CPU implementation | %s |\n", backend_name);
++#ifdef MCMUX_BENCHMARK_C
++    report_printf(report, "| AOT generation | %.6f s |\n", mcmux_c_generation_seconds);
++    report_printf(report, "| AOT compile + link | %.6f s |\n", options->c_build_seconds);
++#endif
+     report_printf(report, "| Platform | `%s` |\n", platform_name());
+     report_printf(report, "| Compiler | `%s` |\n",
+ #ifdef __VERSION__
+@@ -1045,6 +1104,16 @@ static void write_report(Report *report, const BenchmarkResult *results,
+     }
+ 
+     report_printf(report, "\n## CPU backend\n\n");
++#ifdef MCMUX_BENCHMARK_C
++    report_printf(report, "Generated C uses the same cache and runtime as CPU queries. "
++        "Preparation below is model attachment only; break-even excludes AOT generation "
++        "and compilation (reported above).\n\n");
++    report_printf(report, "| Scenario | Generated query evaluations |\n|:--|--:|\n");
++    for (size_t i = 0; i < count; ++i)
++        report_printf(report, "| `%s` | %llu |\n", results[i].scenario.name,
++            (unsigned long long)results[i].cpu_stats.c_evaluations);
++    report_printf(report, "\n");
++#endif
+     report_printf(report, "| Scenario | Preparation | Computed | Cache hits | Fallbacks | Break-even |\n");
+     report_printf(report, "|:--|--:|--:|--:|--:|--:|\n");
+     for (size_t i = 0; i < count; ++i) {
+@@ -1111,7 +1180,8 @@ static void write_report(Report *report, const BenchmarkResult *results,
+             "reference_module_gt_per_second=%.3f cpu_module_gt_per_second=%.3f "
+             "cpu_prepare_seconds=%.9f cpu_evaluations=%llu cpu_cache_hits=%llu "
+             "cpu_fallbacks=%llu neighbor_checks=%llu wires_visited=%llu "
+-            "wire_changes=%llu events_processed=%llu pending_events=%zu\n",
++            "wire_changes=%llu events_processed=%llu pending_events=%zu "
++            "c_evaluations=%llu\n",
+             results[i].scenario.name, cell_name(config->cell), config->width,
+             config->depth,
+             (unsigned long long)((uint64_t)config->width * config->depth),
+@@ -1132,7 +1202,8 @@ static void write_report(Report *report, const BenchmarkResult *results,
+             (unsigned long long)results[i].cpu_stats.wires_visited,
+             (unsigned long long)results[i].cpu_stats.wire_changes,
+             (unsigned long long)results[i].cpu_stats.events_processed,
+-            results[i].cpu_stats.pending_events);
++            results[i].cpu_stats.pending_events,
++            (unsigned long long)results[i].cpu_stats.c_evaluations);
+     }
+     report_printf(report, "SUITE_RESULT profile=%s scenarios=%zu verify=%s\n```\n",
+                   profile, count, options->verify ? "yes" : "no");
+@@ -1170,6 +1241,35 @@ int main(int argc, char **argv)
+         if (!validate_config(&selected[i].config)) return 2;
+     }
+ 
++    if (options.emit_c_path) {
++        FILE *out = fopen(options.emit_c_path, "w");
++        if (!out) return 1;
++        bool ok = true;
++        double start = runtime_clock_now();
++        for (size_t i = 0; i < selected_count && ok; ++i) {
++            Fixture fixture = {0};
++            ok = fixture_build(&selected[i].config, &fixture);
++            if (ok) {
++                char symbol[64];
++                snprintf(symbol, sizeof(symbol), "mcmux_bench_%zu", i);
++                RsResult result = sim_write_c(fixture.world, fixture.min,
++                                               fixture.max, out, symbol);
++                ok = result == RS_OK;
++                if (!ok) fprintf(stderr, "C export failed: %s\n", rs_result_name(result));
++            }
++            fixture_destroy(&fixture);
++        }
++        double seconds = runtime_clock_now() - start;
++        fputs("\nstatic const SimCModel *const mcmux_benchmark_models[] = {\n", out);
++        for (size_t i = 0; i < selected_count; ++i)
++            fprintf(out, "    &mcmux_bench_%zu,\n", i);
++        fprintf(out, "};\nstatic const double mcmux_c_generation_seconds = %.9f;\n", seconds);
++        if (ferror(out)) ok = false;
++        if (fclose(out) != 0) ok = false;
++        if (!ok) (void)remove(options.emit_c_path);
++        return ok ? 0 : 1;
++    }
++
+     BenchmarkResult results[sizeof(scenarios) / sizeof(scenarios[0])];
+     for (size_t i = 0; i < selected_count; ++i)
+         if (!run_scenario(&selected[i], i, selected_count, &results[i])) return 1;
+diff --git a/include/mcmux.h b/include/mcmux.h
+index 7a715ef..a4ea6a5 100644
+--- a/include/mcmux.h
++++ b/include/mcmux.h
+@@ -8,6 +8,7 @@
+ #include "rs/session.h"
+ #include "rs/structure.h"
+ #include "rs/sim.h"
++#include "rs/compiled.h"
+ 
+ /* Load an MCS structure with its saved anchor placed at anchor. On failure,
+  * report the error and return NULL without terminating the host process. */
+diff --git a/include/rs/compiled.h b/include/rs/compiled.h
+new file mode 100644
+index 0000000..93d4e7c
+--- /dev/null
++++ b/include/rs/compiled.h
+@@ -0,0 +1,46 @@
++#ifndef RS_COMPILED_H
++#define RS_COMPILED_H
++
++#include "world.h"
++#include <stdio.h>
++
++/* Pure query results. Scheduling, notifications and writes belong to the
++ * simulator runtime, including when this query is generated C. */
++typedef struct {
++    uint8_t input, side, target_power;
++    bool target_on, locked;
++} SimCEvaluation;
++
++enum { SIM_C_ABI_VERSION = 1 };
++typedef RsResult (*SimCEvaluate)(const BlockState *blocks, uint32_t node,
++                                SimCEvaluation *output);
++typedef struct {
++    uint32_t abi_version;
++    size_t node_count, topology_word_count;
++    const uint32_t *topology;
++    SimCEvaluate evaluate;
++} SimCModel;
++
++/* Emit a C11 translation unit defining `const SimCModel SYMBOL`. SYMBOL must
++ * be a non-keyword C identifier starting with an ASCII letter (max 128 chars).
++ * Include the generated file, or compile it and declare its symbol extern.
++ * The stream is borrowed; caller closes it and discards partial output on
++ * error. No compiler or shell is launched by the library. Call between actions.
++ * No time, block state, pending events or backend selection is changed.
++ * Unsupported queries are emitted as explicit RS_UNSUPPORTED results. */
++RsResult sim_write_c(const World *world, BlockPos min, BlockPos max,
++                     FILE *output, const char *symbol);
++
++/* Attach a trusted, compiled-in model to the inclusive region. The complete
++ * query topology is compared, not just a hash or node count. Dynamic power,
++ * repeater delay and comparator mode may differ from export-time values.
++ * Mismatch returns RS_UNSUPPORTED and leaves the previous backend selected.
++ * The model, code and metadata must stay alive and immutable until detached.
++ * Never pass models compiled against a different version of the core.
++ * Reuses the CPU cache/invalidation policy and reference fallback rules;
++ * topology changes invalidate it. Original tick/notification order is kept. */
++RsResult sim_use_c(World *world, BlockPos min, BlockPos max,
++                   const SimCModel *model);
++bool sim_c_active(const World *world);
++
++#endif
+diff --git a/include/rs/sim.h b/include/rs/sim.h
+index 33c9da5..8829f63 100644
+--- a/include/rs/sim.h
++++ b/include/rs/sim.h
+@@ -10,6 +10,7 @@ typedef struct {
+     uint64_t rails_visited; /* Individual synchronous rail-state evaluations. */
+     uint64_t rail_changes, events_processed;
+     uint64_t cpu_evaluations, cpu_cache_hits, cpu_fallbacks;
++    uint64_t c_evaluations; /* Subset of cpu_evaluations executed as generated C. */
+     size_t pending_events; /* Scheduled ticks, block events and active motions. */
+ } SimStats;
+ 
+diff --git a/nob.c b/nob.c
+index f4185e0..ab4d52b 100644
+--- a/nob.c
++++ b/nob.c
+@@ -36,6 +36,7 @@ static const char *common_sources[] = {
+     "src/redstone_plan.c",
+     "src/redstone_queue.c",
+     "src/redstone_eval.c",
++    "src/redstone_c.c",
+     "src/piston_motion.c",
+     "src/block_updates.c",
+     "src/wire_solver.c",
+@@ -937,12 +938,14 @@ done:
+     return ok;
+ }
+ 
+-static bool build_headless_tool(const char *source, const char *name, bool run)
++static bool build_headless_tool_flags(const char *source, const char *name,
++                                       bool run, const char *define)
+ {
+     if (!nob_mkdir_if_not_exists("build")) return false;
+     const char *output=nob_temp_sprintf("build/%s%s",name,executable_suffix());
+     Nob_Cmd command={0};
+     nob_cmd_append(&command,compiler(),"-std=c11","-O2","-Wall","-Wextra","-Iinclude","-Isrc");
++    if (define) nob_cmd_append(&command, define, "-Ibuild");
+     for (size_t i=0;i<NOB_ARRAY_LEN(common_sources);++i) nob_cmd_append(&command,common_sources[i]);
+     nob_cmd_append(&command,source,"-o",output);
+ #ifndef _WIN32
+@@ -956,6 +959,11 @@ static bool build_headless_tool(const char *source, const char *name, bool run)
+     return true;
+ }
+ 
++static bool build_headless_tool(const char *source, const char *name, bool run)
++{
++    return build_headless_tool_flags(source, name, run, NULL);
++}
++
+ static bool run_redstone_benchmark(int argc, char **argv)
+ {
+     if (!build_headless_tool("benchmarks/redstone_scaling.c",
+@@ -968,6 +976,43 @@ static bool run_redstone_benchmark(int argc, char **argv)
+     return nob_cmd_run(&command);
+ }
+ 
++/* Explicit AOT workflow. Compiler arguments are passed directly, never through
++ * a shell. Generated headers live in build/ and are regenerated on every run. */
++static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
++{
++    if (benchmark) {
++        for (int i = 0; i < argc; ++i) {
++            if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h") ||
++                !strcmp(argv[i], "--list-scenarios"))
++                return run_redstone_benchmark(argc, argv);
++            if (!strcmp(argv[i], "--emit-c")) {
++                nob_log(NOB_ERROR, "benchmark-c manages --emit-c itself");
++                return false;
++            }
++        }
++    }
++    const char *source = benchmark ? "benchmarks/redstone_scaling.c" : "tests/c_codegen_test.c";
++    const char *generator = benchmark ? "redstone_scaling" : "c_codegen_generator";
++    const char *binary = benchmark ? "redstone_scaling_aot" : "c_codegen_test";
++    const char *header = benchmark ? "build/benchmark-c-models.h" : "build/test-c-models.h";
++    const char *define = benchmark ? "-DMCMUX_BENCHMARK_C" : "-DMCMUX_TEST_C";
++    if (!build_headless_tool(source, generator, false)) return false;
++    Nob_Cmd command = {0};
++    nob_cmd_append(&command, nob_temp_sprintf("build/%s%s", generator, executable_suffix()));
++    for (int i = 0; i < argc; ++i) nob_cmd_append(&command, argv[i]);
++    nob_cmd_append(&command, "--emit-c", header);
++    if (!nob_cmd_run(&command)) return false;
++    uint64_t start = nob_nanos_since_unspecified_epoch();
++    if (!build_headless_tool_flags(source, binary, false, define)) return false;
++    double seconds = (double)(nob_nanos_since_unspecified_epoch() - start)/1e9;
++    nob_log(NOB_INFO, "AOT compile and link: %.3f s", seconds);
++    nob_cmd_append(&command, nob_temp_sprintf("build/%s%s", binary, executable_suffix()));
++    for (int i = 0; i < argc; ++i) nob_cmd_append(&command, argv[i]);
++    if (benchmark)
++        nob_cmd_append(&command, "--c-build-seconds", nob_temp_sprintf("%.9f", seconds));
++    return nob_cmd_run(&command);
++}
++
+ static void print_help(const char *program)
+ {
+     printf("Usage: %s [command]\n\n", program);
+@@ -980,6 +1025,9 @@ static void print_help(const char *program)
+     printf("  test         Build and run the structure persistence tests\n");
+     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
+     printf("  benchmark    Run the consolidated redstone benchmark suite\n");
++    printf("  benchmark-c  Generate C queries, compile, then run the same suite\n");
++    printf("  test-c       Generate, compile and test the C query backend\n");
++    printf("  export-c     Export INPUT.mcs OUTPUT.c [SYMBOL] as C query code\n");
+     printf("  lib          Build build/libmcmux.a (no GUI dependencies)\n");
+     printf("  build-c FILE Build a user C program linked with the simulation core\n");
+     printf("  run-c FILE   Build and run a user C program from the repository root\n");
+@@ -1000,6 +1048,23 @@ int main(int argc, char **argv)
+         return build_headless_tool("tools/inspect_structure.c","inspect_structure",false) ? 0 : 1;
+     if (strcmp(command,"benchmark")==0)
+         return run_redstone_benchmark(argc, argv) ? 0 : 1;
++    if (strcmp(command,"benchmark-c")==0)
++        return run_generated_c_tool(true, argc, argv) ? 0 : 1;
++    if (strcmp(command,"test-c")==0) {
++        if (argc) return 1;
++        return run_generated_c_tool(false, 0, NULL) ? 0 : 1;
++    }
++    if (strcmp(command,"export-c")==0) {
++        if (argc != 2 && argc != 3) {
++            nob_log(NOB_ERROR, "usage: %s export-c INPUT.mcs OUTPUT.c [SYMBOL]", program);
++            return 1;
++        }
++        if (!build_headless_tool("tools/export_c.c", "export_c", false)) return 1;
++        Nob_Cmd export = {0};
++        nob_cmd_append(&export, nob_temp_sprintf("build/export_c%s", executable_suffix()));
++        for (int i = 0; i < argc; ++i) nob_cmd_append(&export, argv[i]);
++        return nob_cmd_run(&export) ? 0 : 1;
++    }
+     if (strcmp(command,"lib")==0) return build_core_library() ? 0 : 1;
+     if (strcmp(command,"build-c")==0 || strcmp(command,"run-c")==0) {
+         if (argc!=1) {
+diff --git a/src/redstone_c.c b/src/redstone_c.c
+new file mode 100644
+index 0000000..21f0310
+--- /dev/null
++++ b/src/redstone_c.c
+@@ -0,0 +1,484 @@
++#include "redstone_c.h"
++
++#include <inttypes.h>
++#include <stdarg.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* A canonical, padding-independent description of everything the generated
++ * queries depend on. Dynamic values are intentionally omitted, so a model
++ * compiled once can be attached to many compatible initial states. */
++static StateId topology_state(BlockState block)
++{
++    BlockState key = block_default((BlockId)block.id);
++    switch ((BlockId)block.id) {
++    case BLOCK_REDSTONE_WIRE:
++        key.data.wire = block.data.wire;
++        key.data.wire.power = 0;
++        break;
++    case BLOCK_REDSTONE_TORCH:
++        key.data.torch.support_dir = block.data.torch.support_dir;
++        break;
++    case BLOCK_REDSTONE_REPEATER:
++        key.data.repeater.facing = block.data.repeater.facing;
++        break;
++    case BLOCK_REDSTONE_COMPARATOR:
++        key.data.comparator.facing = block.data.comparator.facing;
++        break;
++    case BLOCK_OBSERVER:
++        key.data.observer.facing = block.data.observer.facing;
++        break;
++    case BLOCK_LEVER:
++        key.data.lever.support_dir = block.data.lever.support_dir;
++        key.data.lever.facing = block.data.lever.facing;
++        break;
++    case BLOCK_REDSTONE_LAMP:
++    case BLOCK_NOTE_BLOCK:
++    case BLOCK_BARREL:
++    case BLOCK_HOPPER:
++    case BLOCK_DROPPER:
++        break;
++    case BLOCK_POWERED_RAIL:
++    case BLOCK_ACTIVATOR_RAIL:
++        key.data.rail.facing = block.data.rail.facing;
++        key.data.rail.ascending = block.data.rail.ascending;
++        break;
++    case BLOCK_PISTON:
++    case BLOCK_STICKY_PISTON:
++        key.data.piston.facing = block.data.piston.facing;
++        key.data.piston.extended = block.data.piston.extended;
++        break;
++    default:
++        key = block;
++        break;
++    }
++    StateId encoded = 0;
++    (void)state_encode(key, &encoded); /* Validated by redstone_state_build. */
++    return encoded;
++}
++
++typedef struct {
++    FILE *output;
++    const uint32_t *expected;
++    size_t count, limit;
++    bool matches;
++} Topology;
++
++static void word(Topology *sink, uint32_t value)
++{
++    if (sink->output) {
++        if (sink->count % 8 == 0) fputs("\n    ", sink->output);
++        fprintf(sink->output, "UINT32_C(%" PRIu32 "),", value);
++    } else if (!sink->expected || sink->count >= sink->limit ||
++               sink->expected[sink->count] != value) {
++        sink->matches = false;
++    }
++    ++sink->count;
++}
++
++static void topology(const RedstonePlan *plan, Topology *sink)
++{
++    word(sink, SIM_C_ABI_VERSION);
++    word(sink, (uint32_t)plan->bounds.min.x);
++    word(sink, (uint32_t)plan->bounds.min.y);
++    word(sink, (uint32_t)plan->bounds.min.z);
++    word(sink, (uint32_t)plan->bounds.max.x);
++    word(sink, (uint32_t)plan->bounds.max.y);
++    word(sink, (uint32_t)plan->bounds.max.z);
++    word(sink, (uint32_t)plan->node_count);
++    word(sink, (uint32_t)plan->input_count);
++    for (size_t i = 0; i < plan->node_count; ++i) {
++        RedstonePlanNode node = plan->nodes[i];
++        word(sink, (uint32_t)node.pos.x);
++        word(sink, (uint32_t)node.pos.y);
++        word(sink, (uint32_t)node.pos.z);
++        word(sink, topology_state(node.initial_state));
++        word(sink, node.flags);
++        word(sink, node.wire_output_faces);
++        word(sink, node.first_input);
++        word(sink, node.input_count);
++    }
++    for (size_t i = 0; i < plan->input_count; ++i) {
++        RedstonePlanInput input = plan->inputs[i];
++        word(sink, input.source);
++        word(sink, input.kind);
++        word(sink, input.source_face);
++        word(sink, input.attenuation);
++    }
++}
++
++bool redstone_c_matches(const RedstonePlan *plan, const SimCModel *model)
++{
++    if (!plan || !model || model->abi_version != SIM_C_ABI_VERSION ||
++        model->node_count != plan->node_count || !model->evaluate ||
++        !model->topology) return false;
++    Topology sink = {.expected = model->topology,
++                     .limit = model->topology_word_count, .matches = true};
++    topology(plan, &sink);
++    return sink.matches && sink.count == sink.limit;
++}
++
++static bool symbol_valid(const char *symbol)
++{
++    if (!symbol || !((*symbol >= 'a' && *symbol <= 'z') ||
++                     (*symbol >= 'A' && *symbol <= 'Z'))) return false;
++    size_t length = 0;
++    for (const char *p = symbol; *p; ++p) {
++        if (++length > 128 || !((*p >= 'a' && *p <= 'z') ||
++            (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
++            *p == '_')) return false;
++    }
++    static const char *const keywords[] = {
++        "auto", "break", "case", "char", "const", "continue", "default",
++        "do", "double", "else", "enum", "extern", "float", "for", "goto",
++        "if", "inline", "int", "long", "register", "restrict", "return",
++        "short", "signed", "sizeof", "static", "struct", "switch",
++        "typedef", "union", "unsigned", "void", "volatile", "while",
++        /* Macros/types used by the generated unit are not valid model names. */
++        "bool", "true", "false", "NULL", "size_t", "uint8_t", "uint32_t",
++        "BlockState", "SimCModel", "SimCEvaluation", "RsResult",
++        "SIM_C_ABI_VERSION", "UINT32_C"
++    };
++    for (size_t i = 0; i < sizeof(keywords)/sizeof(*keywords); ++i)
++        if (strcmp(symbol, keywords[i]) == 0) return false;
++    return true;
++}
++
++/* Check the same supported cases as redstone_eval.c before emitting a node.
++ * Conductors only recurse into DIRECT reads, so the walk has depth <= 2. */
++static bool signal_supported(const RedstonePlan *plan, RedstoneNodeId id,
++                              bool direct)
++{
++    RedstonePlanNode node = plan->nodes[id];
++    if (node.flags & REDSTONE_NODE_BOUNDARY) return false;
++    BlockState block = node.initial_state;
++    switch ((BlockId)block.id) {
++    case BLOCK_REDSTONE_BLOCK:
++    case BLOCK_REDSTONE_WIRE:
++    case BLOCK_REDSTONE_TORCH:
++    case BLOCK_REDSTONE_REPEATER:
++    case BLOCK_REDSTONE_COMPARATOR:
++    case BLOCK_OBSERVER:
++    case BLOCK_LEVER:
++        break;
++    default: {
++        const BlockDef *definition = block_definition((BlockId)block.id);
++        if (definition->signal || definition->direct_signal) return false;
++        break;
++    }
++    }
++    if (!direct && (node.flags & REDSTONE_NODE_CONDUCTOR)) {
++        for (size_t i = 0; i < node.input_count; ++i) {
++            RedstonePlanInput input = plan->inputs[node.first_input + i];
++            if (input.kind != REDSTONE_INPUT_DIRECT) continue;
++            if (input.source_face >= DIR_COUNT ||
++                !signal_supported(plan, input.source, true)) return false;
++        }
++    }
++    return true;
++}
++
++static bool node_supported(const RedstonePlan *plan, size_t id)
++{
++    RedstonePlanNode node = plan->nodes[id];
++    if (node.flags & (REDSTONE_NODE_BOUNDARY | REDSTONE_NODE_RUNTIME |
++                      REDSTONE_NODE_INPUT_FALLBACK)) return false;
++    BlockId target = (BlockId)node.initial_state.id;
++    switch (target) {
++    case BLOCK_REDSTONE_WIRE:
++    case BLOCK_REDSTONE_TORCH:
++    case BLOCK_REDSTONE_REPEATER:
++    case BLOCK_REDSTONE_COMPARATOR:
++    case BLOCK_IRON:
++    case BLOCK_SLIME:
++    case BLOCK_TARGET:
++        break;
++    default:
++        return false;
++    }
++    for (size_t i = 0; i < node.input_count; ++i) {
++        RedstonePlanInput input = plan->inputs[node.first_input + i];
++        RedstonePlanNode source = plan->nodes[input.source];
++        if (source.flags & REDSTONE_NODE_BOUNDARY) return false;
++        BlockId kind = (BlockId)source.initial_state.id;
++        if (target == BLOCK_REDSTONE_COMPARATOR &&
++            block_definition(kind)->analog_output) return false;
++        if (kind == BLOCK_REDSTONE_WIRE &&
++            (target == BLOCK_REDSTONE_REPEATER ||
++             target == BLOCK_REDSTONE_COMPARATOR ||
++             input.source_face == DIR_COUNT)) continue;
++        if (input.kind == REDSTONE_INPUT_SIDE &&
++            target == BLOCK_REDSTONE_COMPARATOR &&
++            kind == BLOCK_REDSTONE_BLOCK) continue;
++        if (input.source_face >= DIR_COUNT ||
++            !signal_supported(plan, input.source,
++                              input.kind != REDSTONE_INPUT_DEFAULT)) return false;
++    }
++    return true;
++}
++
++typedef struct {
++    char *data;
++    size_t length, capacity;
++    RsResult error;
++} CText;
++
++static void text_printf(CText *out, const char *format, ...)
++{
++    if (out->error != RS_OK) return;
++    va_list args, copy;
++    va_start(args, format);
++    va_copy(copy, args);
++    int count = vsnprintf(NULL, 0, format, copy);
++    va_end(copy);
++    if (count < 0) out->error = RS_INTERNAL_ERROR;
++    else if (out->length > SIZE_MAX - (size_t)count - 1)
++        out->error = RS_OUT_OF_MEMORY;
++    else {
++        size_t needed = out->length + (size_t)count + 1;
++        if (needed > out->capacity) {
++            size_t capacity = out->capacity ? out->capacity : 256;
++            while (capacity < needed) {
++                if (capacity > SIZE_MAX/2) { capacity = needed; break; }
++                capacity *= 2;
++            }
++            char *data = realloc(out->data, capacity);
++            if (!data) out->error = RS_OUT_OF_MEMORY;
++            else { out->data = data; out->capacity = capacity; }
++        }
++        if (out->error == RS_OK) {
++            vsnprintf(out->data + out->length, out->capacity - out->length, format, args);
++            out->length += (size_t)count;
++        }
++    }
++    va_end(args);
++}
++
++static void text_puts(const char *text, CText *out)
++{
++    text_printf(out, "%s", text);
++}
++
++static unsigned emit_signal(CText *out, const RedstonePlan *plan,
++                             RedstoneNodeId id, unsigned face,
++                             bool without_wire, bool direct, unsigned *next,
++                             size_t base)
++{
++    RedstonePlanNode node = plan->nodes[id];
++    BlockState block = node.initial_state;
++    int64_t offset = (int64_t)id - (int64_t)base;
++    unsigned value = (*next)++;
++    text_printf(out, "    uint8_t v%u = ", value);
++    switch ((BlockId)block.id) {
++    case BLOCK_REDSTONE_BLOCK:
++        text_printf(out, "%u", direct ? 0u : 15u);
++        break;
++    case BLOCK_REDSTONE_WIRE:
++        if (without_wire || face == DIR_UP ||
++            (face != DIR_DOWN && !(node.wire_output_faces & (1u << face))))
++            text_puts("0", out);
++        else text_printf(out, "blocks[%" PRId64 "].data.wire.power", offset);
++        break;
++    case BLOCK_REDSTONE_TORCH:
++        if (face == block.data.torch.support_dir || (direct && face != DIR_UP))
++            text_puts("0", out);
++        else text_printf(out, "blocks[%" PRId64 "].data.torch.lit ? 15 : 0", offset);
++        break;
++    case BLOCK_REDSTONE_REPEATER:
++        if (face != block.data.repeater.facing) text_puts("0", out);
++        else text_printf(out, "blocks[%" PRId64 "].data.repeater.powered ? 15 : 0", offset);
++        break;
++    case BLOCK_REDSTONE_COMPARATOR:
++        if (face != block.data.comparator.facing) text_puts("0", out);
++        else text_printf(out, "blocks[%" PRId64 "].data.comparator.powered ? "
++                          "blocks[%" PRId64 "].data.comparator.output : 0", offset, offset);
++        break;
++    case BLOCK_OBSERVER:
++        if (face != block.data.observer.facing) text_puts("0", out);
++        else text_printf(out, "blocks[%" PRId64 "].data.observer.powered ? 15 : 0", offset);
++        break;
++    case BLOCK_LEVER:
++        if (direct && face != block.data.lever.support_dir) text_puts("0", out);
++        else text_printf(out, "blocks[%" PRId64 "].data.lever.powered ? 15 : 0", offset);
++        break;
++    default:
++        text_puts("0", out);
++        break;
++    }
++    text_puts(";\n", out);
++    if (!direct && (node.flags & REDSTONE_NODE_CONDUCTOR)) {
++        for (size_t i = 0; i < node.input_count; ++i) {
++            RedstonePlanInput input = plan->inputs[node.first_input + i];
++            if (input.kind != REDSTONE_INPUT_DIRECT) continue;
++            unsigned child = emit_signal(out, plan, input.source,
++                input.source_face, without_wire, true, next, base);
++            text_printf(out, "    if (v%u > v%u) v%u = v%u;\n",
++                    child, value, value, child);
++        }
++    }
++    return value;
++}
++
++static void emit_body(CText *out, const RedstonePlan *plan, size_t id)
++{
++    RedstonePlanNode node = plan->nodes[id];
++    BlockId target = (BlockId)node.initial_state.id;
++    text_puts("    (void)blocks;\n    SimCEvaluation r = {0};\n", out);
++    unsigned next = 0;
++    for (size_t i = 0; i < node.input_count; ++i) {
++        RedstonePlanInput input = plan->inputs[node.first_input + i];
++        BlockId source = (BlockId)plan->nodes[input.source].initial_state.id;
++        unsigned value;
++        if (source == BLOCK_REDSTONE_WIRE &&
++            (target == BLOCK_REDSTONE_REPEATER ||
++             target == BLOCK_REDSTONE_COMPARATOR || input.source_face == DIR_COUNT)) {
++            value = next++;
++            text_printf(out, "    uint8_t v%u = blocks[%" PRId64 "].data.wire.power;\n",
++                    value, (int64_t)input.source - (int64_t)id);
++        } else if (input.kind == REDSTONE_INPUT_SIDE &&
++                   target == BLOCK_REDSTONE_COMPARATOR && source == BLOCK_REDSTONE_BLOCK) {
++            value = next++;
++            text_printf(out, "    uint8_t v%u = 15;\n", value);
++        } else {
++            value = emit_signal(out, plan, input.source, input.source_face,
++                target == BLOCK_REDSTONE_WIRE,
++                input.kind != REDSTONE_INPUT_DEFAULT, &next, id);
++        }
++        if (input.attenuation)
++            text_printf(out, "    v%u = v%u > %u ? (uint8_t)(v%u - %u) : 0;\n",
++                    value, value, input.attenuation, value, input.attenuation);
++        const char *channel = input.kind == REDSTONE_INPUT_SIDE ? "side" : "input";
++        text_printf(out, "    if (v%u > r.%s) r.%s = v%u;\n",
++                value, channel, channel, value);
++    }
++    text_puts("    r.target_on = r.input > 0;\n    r.target_power = r.input;\n", out);
++    if (target == BLOCK_REDSTONE_TORCH) {
++        text_puts("    r.target_on = !r.target_on;\n"
++              "    r.target_power = r.target_on ? 15 : 0;\n", out);
++    } else if (target == BLOCK_REDSTONE_REPEATER) {
++        text_puts("    r.locked = r.side > 0;\n"
++            "    if (r.locked) r.target_on = blocks[0].data.repeater.powered;\n"
++            "    r.target_power = r.target_on ? 15 : 0;\n", out);
++    } else if (target == BLOCK_REDSTONE_COMPARATOR) {
++        text_puts("    r.target_on = r.input > 0 && (r.input > r.side ||\n"
++            "        (r.input == r.side && !blocks[0].data.comparator.subtract));\n"
++            "    if (blocks[0].data.comparator.subtract)\n"
++            "        r.target_power = r.input > r.side ? (uint8_t)(r.input - r.side) : 0;\n", out);
++    }
++    text_puts("    *output = r;\n    return RS_OK;\n", out);
++}
++
++typedef struct {
++    CText body;
++    uint64_t hash;
++    uint32_t next;
++    size_t first_node;
++} Query;
++
++static uint64_t text_hash(const CText *text)
++{
++    uint64_t hash = UINT64_C(14695981039346656037);
++    for (size_t i = 0; i < text->length; ++i) {
++        hash ^= (unsigned char)text->data[i];
++        hash *= UINT64_C(1099511628211);
++    }
++    return hash;
++}
++
++RsResult redstone_c_write(const RedstonePlan *plan, FILE *out,
++                          const char *symbol)
++{
++    if (!plan || !out || !symbol_valid(symbol) || plan->input_count > UINT32_MAX ||
++        plan->node_count > (SIZE_MAX - 9)/8 ||
++        plan->input_count > (SIZE_MAX - 9 - plan->node_count*8)/4)
++        return RS_INVALID_ARGUMENT;
++    /* Validate all indices/ranges before touching the stream. */
++    RedstoneState validation = {0};
++    RsResult result = redstone_state_build(plan, &validation);
++    redstone_state_destroy(&validation);
++    if (result != RS_OK) return result;
++    Query *queries = NULL;
++    uint32_t *mapping = NULL, *buckets = NULL;
++    size_t query_count = 0, bucket_count = 1;
++    if (plan->node_count > SIZE_MAX/sizeof(*queries)) return RS_OUT_OF_MEMORY;
++    if (plan->node_count) {
++        while (bucket_count < plan->node_count) {
++            if (bucket_count > SIZE_MAX/2) return RS_OUT_OF_MEMORY;
++            bucket_count *= 2;
++        }
++        if (bucket_count > SIZE_MAX/sizeof(*buckets)) return RS_OUT_OF_MEMORY;
++        queries = calloc(plan->node_count, sizeof(*queries));
++        mapping = malloc(plan->node_count*sizeof(*mapping));
++        buckets = malloc(bucket_count*sizeof(*buckets));
++        if (!queries || !mapping || !buckets) { result = RS_OUT_OF_MEMORY; goto cleanup; }
++        for (size_t i = 0; i < bucket_count; ++i) buckets[i] = UINT32_MAX;
++    }
++    /* Share identical code, never state. Each body uses constant offsets from
++     * its target block. Full text comparison makes hash collisions harmless. */
++    for (size_t i = 0; i < plan->node_count; ++i) {
++        mapping[i] = UINT32_MAX;
++        if (!node_supported(plan, i)) continue;
++        CText body = {0};
++        emit_body(&body, plan, i);
++        if (body.error != RS_OK) {
++            result = body.error;
++            free(body.data);
++            goto cleanup;
++        }
++        uint64_t hash = text_hash(&body);
++        size_t bucket = (size_t)hash & (bucket_count - 1);
++        uint32_t match = buckets[bucket];
++        while (match != UINT32_MAX) {
++            Query *query = &queries[match];
++            if (query->hash == hash && query->body.length == body.length &&
++                memcmp(query->body.data, body.data, body.length) == 0) break;
++            match = query->next;
++        }
++        if (match != UINT32_MAX) free(body.data);
++        else {
++            match = (uint32_t)query_count++;
++            queries[match] = (Query){body, hash, buckets[bucket], i};
++            buckets[bucket] = match;
++        }
++        mapping[i] = match;
++    }
++    fprintf(out, "/* Generated by mcmux. Re-export after changing the core or topology.\n"
++        " * Pure queries only: time, writes and notifications use the core runtime.\n"
++        " * Identical relative queries share code; all blocks keep independent state. */\n"
++        "#include \"rs/compiled.h\"\n\n"
++        "static const uint32_t %s_topology[] = {", symbol);
++    Topology sink = {.output = out};
++    topology(plan, &sink);
++    fputs("\n};\n", out);
++    for (size_t i = 0; i < query_count; ++i) {
++        RedstonePlanNode node = plan->nodes[queries[i].first_node];
++        fprintf(out, "\n/* Query shape first seen at (%d, %d, %d). */\n"
++            "static RsResult %s_query_%zu(const BlockState *blocks, SimCEvaluation *output)\n{\n",
++            node.pos.x, node.pos.y, node.pos.z, symbol, i);
++        fputs(queries[i].body.data, out);
++        fputs("}\n", out);
++    }
++    fprintf(out, "\nstatic RsResult %s_evaluate(const BlockState *blocks, "
++        "uint32_t node, SimCEvaluation *output)\n{\n", symbol);
++    if (plan->node_count) {
++        fputs("    static RsResult (*const queries[])(const BlockState *, SimCEvaluation *) = {\n", out);
++        for (size_t i = 0; i < plan->node_count; ++i) {
++            if (mapping[i] != UINT32_MAX)
++                fprintf(out, "        %s_query_%" PRIu32 ",\n", symbol, mapping[i]);
++            else fputs("        NULL,\n", out);
++        }
++        fprintf(out, "    };\n    if (!blocks || !output || node >= %zu) return RS_INVALID_ARGUMENT;\n"
++            "    return queries[node] ? queries[node](blocks + node, output) : RS_UNSUPPORTED;\n",
++            plan->node_count);
++    } else {
++        fputs("    (void)blocks; (void)node; (void)output;\n    return RS_INVALID_ARGUMENT;\n", out);
++    }
++    fprintf(out, "}\n\nconst SimCModel %s = {\n"
++        "    SIM_C_ABI_VERSION, %zu, %zu, %s_topology, %s_evaluate\n};\n",
++        symbol, plan->node_count, sink.count, symbol, symbol);
++    result = ferror(out) ? RS_IO_ERROR : RS_OK;
++cleanup:
++    for (size_t i = 0; i < query_count; ++i) free(queries[i].body.data);
++    free(queries); free(mapping); free(buckets);
++    return result;
++}
+diff --git a/src/redstone_c.h b/src/redstone_c.h
+new file mode 100644
+index 0000000..d3cc0c8
+--- /dev/null
++++ b/src/redstone_c.h
+@@ -0,0 +1,8 @@
++#ifndef RS_REDSTONE_C_H
++#define RS_REDSTONE_C_H
++#include "redstone_eval.h"
++
++bool redstone_c_matches(const RedstonePlan *plan, const SimCModel *model);
++RsResult redstone_c_write(const RedstonePlan *plan, FILE *output,
++                          const char *symbol);
++#endif
+diff --git a/src/redstone_eval.h b/src/redstone_eval.h
+index d5b6b43..9076828 100644
+--- a/src/redstone_eval.h
++++ b/src/redstone_eval.h
+@@ -2,6 +2,7 @@
+ #define RS_REDSTONE_EVAL_H
+ 
+ #include "redstone_plan.h"
++#include "rs/compiled.h"
+ #include "blocks/block_internal.h"
+ 
+ /* Independent block-state storage for one run. Pending ticks, torch burnout
+@@ -21,10 +22,7 @@ typedef struct {
+  * relay. A comparator's target_on gates its cache independently. A locked
+  * repeater retains its current output. Torch burnout, scheduled events,
+  * notifications and their order remain the executor's responsibility. */
+-typedef struct {
+-    uint8_t input, side, target_power;
+-    bool target_on, locked;
+-} RedstoneEvaluation;
++typedef SimCEvaluation RedstoneEvaluation;
+ 
+ /* Copy the actual initial states retained by a plan into an empty destination.
+  * No reset, settling pass, world write, event execution or tick advance. */
+diff --git a/src/sim_executor.c b/src/sim_executor.c
+index b7b922b..c3ada3b 100644
+--- a/src/sim_executor.c
++++ b/src/sim_executor.c
+@@ -1,5 +1,6 @@
+ #include "sim_executor.h"
+ #include "redstone_queue.h"
++#include "redstone_c.h"
+ 
+ #include <stdlib.h>
+ 
+@@ -152,6 +153,7 @@ typedef struct {
+     uint64_t revision;
+     uint32_t generation;
+     bool valid;
++    const SimCModel *model;
+ } CpuExecutor;
+ 
+ static void cpu_destroy(SimExecutorHost *host, void *context)
+@@ -259,9 +261,12 @@ static RsResult cpu_evaluate(SimExecutorHost *host, void *context, BlockPos pos,
+         return RS_UNSUPPORTED;
+     }
+     RedstoneEvaluation value;
+-    RsResult result = redstone_evaluate(&cpu->state, node, &value);
++    RsResult result = cpu->model ?
++        cpu->model->evaluate(cpu->state.blocks, node, &value) :
++        redstone_evaluate(&cpu->state, node, &value);
+     if (result == RS_OK) {
+         ++world->sim->stats.cpu_evaluations;
++        if (cpu->model) ++world->sim->stats.c_evaluations;
+         cache->value = value;
+         cache->cached = CPU_CACHE_VALUE;
+         *output = value;
+@@ -292,7 +297,8 @@ static RsResult backend_change_ready(const World *world)
+     return world_result(world);
+ }
+ 
+-RsResult sim_use_cpu(World *world, BlockPos min, BlockPos max)
++static RsResult use_cpu(World *world, BlockPos min, BlockPos max,
++                         const SimCModel *model)
+ {
+     RsResult result = backend_change_ready(world);
+     if (result != RS_OK) return result;
+@@ -301,6 +307,11 @@ RsResult sim_use_cpu(World *world, BlockPos min, BlockPos max)
+     if (!cpu) return RS_OUT_OF_MEMORY;
+     result = redstone_plan_build(world, (RedstonePlanBounds){min, max}, &cpu->plan);
+     if (result != RS_OK) goto fail;
++    if (model && !redstone_c_matches(&cpu->plan, model)) {
++        result = RS_UNSUPPORTED;
++        goto fail;
++    }
++    cpu->model = model;
+     result = redstone_state_build(&cpu->plan, &cpu->state);
+     if (result != RS_OK) goto fail;
+     result = redstone_dirty_queue_prepare(&cpu->dirty, cpu->plan.node_count);
+@@ -328,6 +339,34 @@ fail:
+     return result;
+ }
+ 
++RsResult sim_use_cpu(World *world, BlockPos min, BlockPos max)
++{
++    return use_cpu(world, min, max, NULL);
++}
++
++RsResult sim_use_c(World *world, BlockPos min, BlockPos max,
++                   const SimCModel *model)
++{
++    if (!model || model->abi_version != SIM_C_ABI_VERSION ||
++        !model->topology || !model->evaluate)
++        return RS_INVALID_ARGUMENT;
++    return use_cpu(world, min, max, model);
++}
++
++RsResult sim_write_c(const World *world, BlockPos min, BlockPos max,
++                     FILE *output, const char *symbol)
++{
++    if (!output || !symbol) return RS_INVALID_ARGUMENT;
++    RsResult result = backend_change_ready(world);
++    if (result != RS_OK) return result;
++    if (world->sim->piston_motions.active) return RS_UNSUPPORTED;
++    RedstonePlan plan = {0};
++    result = redstone_plan_build(world, (RedstonePlanBounds){min, max}, &plan);
++    if (result == RS_OK) result = redstone_c_write(&plan, output, symbol);
++    redstone_plan_destroy(&plan);
++    return result;
++}
++
+ RsResult sim_use_reference(World *world)
+ {
+     RsResult result = backend_change_ready(world);
+@@ -343,3 +382,10 @@ bool sim_cpu_active(const World *world)
+     return world && world->sim->executor.ops == &cpu_ops &&
+            cpu_valid(world, world->sim->executor.context);
+ }
++
++bool sim_c_active(const World *world)
++{
++    if (!sim_cpu_active(world)) return false;
++    const CpuExecutor *cpu = world->sim->executor.context;
++    return cpu->model != NULL;
++}
+diff --git a/tests/c_codegen_test.c b/tests/c_codegen_test.c
+new file mode 100644
+index 0000000..065877c
+--- /dev/null
++++ b/tests/c_codegen_test.c
+@@ -0,0 +1,373 @@
++#include "mcmux.h"
++#include "redstone_c.h"
++#include "sim_internal.h"
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#ifdef MCMUX_TEST_C
++#include "test-c-models.h"
++#endif
++
++#define REQUIRE(condition) do { if (!(condition)) { \
++    fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition); \
++    exit(1); \
++} } while (0)
++
++static const BlockPos MIN = {6,0,4}, MAX = {14,1,18};
++
++static void put(World *world, int x, int y, int z, BlockId kind, Direction facing)
++{
++    BlockState state = block_default(kind);
++    if (kind == BLOCK_REDSTONE_REPEATER) state.data.repeater.facing = facing;
++    if (kind == BLOCK_REDSTONE_COMPARATOR) state.data.comparator.facing = facing;
++    if (kind == BLOCK_LEVER) {
++        state.data.lever.support_dir = DIR_DOWN;
++        state.data.lever.facing = DIR_EAST;
++    }
++    REQUIRE(world_set_block(world, (BlockPos){x,y,z}, state, UPDATE_CLIENTS));
++}
++
++static World *fixture(void)
++{
++    World *world = world_create((WorldConfig){0});
++    REQUIRE(world);
++    REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
++    for (int x = MIN.x; x <= MAX.x; ++x)
++        for (int z = MIN.z; z <= MAX.z; ++z)
++            put(world, x, 0, z, BLOCK_IRON, DIR_EAST);
++    put(world, 8,1,8, BLOCK_LEVER, DIR_EAST);
++    put(world, 9,1,8, BLOCK_REDSTONE_REPEATER, DIR_EAST);
++    put(world, 10,1,8, BLOCK_REDSTONE_REPEATER, DIR_EAST);
++    put(world, 11,1,8, BLOCK_IRON, DIR_EAST);
++    put(world, 9,1,6, BLOCK_LEVER, DIR_EAST);
++    put(world, 9,1,7, BLOCK_REDSTONE_REPEATER, DIR_SOUTH);
++    put(world, 8,1,16, BLOCK_LEVER, DIR_EAST);
++    put(world, 9,1,16, BLOCK_IRON, DIR_EAST);
++    put(world, 10,1,16, BLOCK_REDSTONE_COMPARATOR, DIR_EAST);
++    put(world, 11,1,16, BLOCK_IRON, DIR_EAST);
++    put(world, 10,1,14, BLOCK_LEVER, DIR_EAST);
++    put(world, 10,1,15, BLOCK_REDSTONE_REPEATER, DIR_SOUTH);
++    REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
++    REQUIRE(world_result(world) == RS_OK);
++    return world;
++}
++
++/* Synthetic valid query plans exercise every source face, channel, wire
++ * suppression, attenuation, conductor relay and explicit unsupported case.
++ * They test query semantics, not physical world construction. */
++static RedstonePlan rules(void)
++{
++    RedstonePlan plan = {0};
++    plan.nodes = calloc(2048, sizeof(*plan.nodes));
++    plan.inputs = calloc(8192, sizeof(*plan.inputs));
++    REQUIRE(plan.nodes && plan.inputs);
++    const BlockId sources[] = {BLOCK_REDSTONE_BLOCK, BLOCK_REDSTONE_WIRE,
++        BLOCK_REDSTONE_TORCH, BLOCK_REDSTONE_REPEATER, BLOCK_REDSTONE_COMPARATOR,
++        BLOCK_OBSERVER, BLOCK_LEVER, BLOCK_IRON, BLOCK_SLIME, BLOCK_BARREL,
++        BLOCK_REDSTONE_BLOCK, BLOCK_GLASS};
++    for (size_t i = 0; i < sizeof(sources)/sizeof(*sources); ++i) {
++        RedstonePlanNode *node = &plan.nodes[plan.node_count++];
++        node->initial_state = block_default(sources[i]);
++        node->pos = (BlockPos){(int)i,2,0};
++        if (sources[i] == BLOCK_REDSTONE_WIRE) {
++            node->initial_state.data.wire.connections =
++                (1u << DIR_EAST) | (1u << DIR_SOUTH);
++            node->wire_output_faces = (1u << DIR_WEST) | (1u << DIR_NORTH);
++        }
++        if (sources[i] == BLOCK_REDSTONE_TORCH)
++            node->initial_state.data.torch.support_dir = DIR_DOWN;
++        if (sources[i] == BLOCK_LEVER) {
++            node->initial_state.data.lever.support_dir = DIR_DOWN;
++            node->initial_state.data.lever.facing = DIR_EAST;
++        }
++        if (sources[i] == BLOCK_IRON || sources[i] == BLOCK_SLIME)
++            node->flags = REDSTONE_NODE_CONDUCTOR;
++    }
++    plan.nodes[10].flags = REDSTONE_NODE_BOUNDARY;
++    plan.nodes[7].first_input = (uint32_t)plan.input_count;
++    plan.inputs[plan.input_count++] = (RedstonePlanInput){2,REDSTONE_INPUT_DIRECT,DIR_UP,0};
++    plan.inputs[plan.input_count++] = (RedstonePlanInput){6,REDSTONE_INPUT_DIRECT,DIR_DOWN,0};
++    plan.nodes[7].input_count = 2;
++    plan.nodes[8].first_input = (uint32_t)plan.input_count;
++    plan.inputs[plan.input_count++] = (RedstonePlanInput){7,REDSTONE_INPUT_DIRECT,DIR_EAST,0};
++    plan.inputs[plan.input_count++] = (RedstonePlanInput){1,REDSTONE_INPUT_DIRECT,DIR_WEST,0};
++    plan.nodes[8].input_count = 2;
++    const BlockId targets[] = {BLOCK_REDSTONE_WIRE, BLOCK_REDSTONE_TORCH,
++        BLOCK_REDSTONE_REPEATER, BLOCK_REDSTONE_COMPARATOR, BLOCK_IRON,
++        BLOCK_SLIME, BLOCK_TARGET};
++    const uint8_t attenuation[] = {0,1,15};
++    for (size_t t = 0; t < sizeof(targets)/sizeof(*targets); ++t) {
++        for (size_t s = 0; s < sizeof(sources)/sizeof(*sources); ++s) {
++            for (unsigned face = 0; face <= DIR_COUNT; ++face) {
++                for (unsigned kind = 0; kind <= REDSTONE_INPUT_DIRECT; ++kind) {
++                    size_t id = plan.node_count++;
++                    REQUIRE(id < 2048 && plan.input_count + 2 < 8192);
++                    RedstonePlanNode *node = &plan.nodes[id];
++                    node->pos = (BlockPos){(int)id,2,0};
++                    node->initial_state = block_default(targets[t]);
++                    node->first_input = (uint32_t)plan.input_count;
++                    node->input_count = 2;
++                    plan.inputs[plan.input_count++] = (RedstonePlanInput){
++                        (uint32_t)s, (uint8_t)kind, (uint8_t)face,
++                        attenuation[(face + kind) % 3]};
++                    plan.inputs[plan.input_count++] = (RedstonePlanInput){
++                        1, kind == REDSTONE_INPUT_SIDE ? REDSTONE_INPUT_DEFAULT : REDSTONE_INPUT_SIDE,
++                        DIR_COUNT, 1};
++                }
++            }
++        }
++    }
++    /* Equal relative query bodies must still read different instance states. */
++    for (unsigned pair = 0; pair < 2; ++pair) {
++        size_t source = plan.node_count++;
++        plan.nodes[source].initial_state = block_default(BLOCK_REDSTONE_WIRE);
++        plan.nodes[source].pos = (BlockPos){(int)source,2,0};
++        RedstonePlanNode *target = &plan.nodes[plan.node_count++];
++        target->initial_state = block_default(BLOCK_REDSTONE_TORCH);
++        target->pos = (BlockPos){(int)source + 1,2,0};
++        target->first_input = (uint32_t)plan.input_count;
++        target->input_count = 1;
++        plan.inputs[plan.input_count++] = (RedstonePlanInput){
++            (uint32_t)source, REDSTONE_INPUT_DEFAULT, DIR_DOWN, 0};
++    }
++    for (unsigned flags = 0; flags < 3; ++flags) {
++        RedstonePlanNode *node = &plan.nodes[plan.node_count++];
++        node->initial_state = block_default(BLOCK_REDSTONE_REPEATER);
++        node->first_input = (uint32_t)plan.input_count;
++        node->flags = flags == 0 ? REDSTONE_NODE_BOUNDARY :
++                      flags == 1 ? REDSTONE_NODE_RUNTIME : REDSTONE_NODE_INPUT_FALLBACK;
++    }
++    return plan;
++}
++
++static int emit(const char *path)
++{
++    World *world = fixture();
++    FILE *out = fopen(path, "w");
++    REQUIRE(out);
++    uint64_t tick = world_tick(world), revision = world_revision(world);
++    REQUIRE(sim_write_c(world, MIN, MAX, out, "test_live") == RS_OK);
++    REQUIRE(world_tick(world) == tick && world_revision(world) == revision);
++    REQUIRE(!sim_cpu_active(world));
++    REQUIRE(sim_write_c(world, (BlockPos){9,0,4}, MAX, out, "test_boundary") == RS_OK);
++    RedstonePlan plan = rules();
++    REQUIRE(redstone_c_write(&plan, out, "test_rules") == RS_OK);
++    redstone_plan_destroy(&plan);
++    World *empty = world_create((WorldConfig){0});
++    REQUIRE(empty);
++    REQUIRE(sim_write_c(empty, MIN, MAX, out, "test_empty") == RS_OK);
++    REQUIRE(fclose(out) == 0);
++    world_destroy(empty);
++    world_destroy(world);
++    return 0;
++}
++
++#ifdef MCMUX_TEST_C
++static bool evaluation_equal(SimCEvaluation a, SimCEvaluation b)
++{
++    return a.input == b.input && a.side == b.side && a.target_power == b.target_power &&
++           a.target_on == b.target_on && a.locked == b.locked;
++}
++
++static void query_tests(void)
++{
++    RedstonePlan plan = rules();
++    REQUIRE(redstone_c_matches(&plan, &test_rules));
++    RedstoneState state = {0};
++    REQUIRE(redstone_state_build(&plan, &state) == RS_OK);
++    uint32_t random = 1234567;
++    size_t supported = 0, unsupported = 0;
++    for (unsigned round = 0; round < 128; ++round) {
++        for (size_t i = 0; i < state.node_count; ++i) {
++            random = random*1664525u + 1013904223u;
++            BlockState block = state.blocks[i];
++            switch ((BlockId)block.id) {
++            case BLOCK_REDSTONE_WIRE: block.data.wire.power = (uint8_t)(random % 16); break;
++            case BLOCK_REDSTONE_TORCH: block.data.torch.lit = (random >> 16) & 1u; break;
++            case BLOCK_REDSTONE_REPEATER:
++                block.data.repeater.powered = (random >> 16) & 1u;
++                block.data.repeater.delay = (uint8_t)(1 + random % 4);
++                block.data.repeater.locked = (random >> 17) & 1u;
++                break;
++            case BLOCK_REDSTONE_COMPARATOR:
++                block.data.comparator.output = (uint8_t)(random % 16);
++                block.data.comparator.powered = (random >> 16) & 1u;
++                block.data.comparator.subtract = (random >> 17) & 1u;
++                break;
++            case BLOCK_OBSERVER: block.data.observer.powered = (random >> 16) & 1u; break;
++            case BLOCK_LEVER: block.data.lever.powered = (random >> 16) & 1u; break;
++            default: break;
++            }
++            RsResult result = redstone_state_set(&state, (RedstoneNodeId)i, block);
++            REQUIRE(result == RS_OK || result == RS_UNCHANGED);
++        }
++        for (size_t i = 0; i < state.node_count; ++i) {
++            SimCEvaluation sentinel = {3,4,5,true,true}, expected = sentinel, actual = sentinel;
++            RsResult a = redstone_evaluate(&state, (RedstoneNodeId)i, &expected);
++            RsResult b = test_rules.evaluate(state.blocks, (uint32_t)i, &actual);
++            REQUIRE(a == b && evaluation_equal(expected, actual));
++            if (a == RS_OK) ++supported;
++            else { REQUIRE(a == RS_UNSUPPORTED); ++unsupported; }
++        }
++    }
++    REQUIRE(supported && unsupported);
++    REQUIRE(test_rules.evaluate(state.blocks, UINT32_MAX, NULL) == RS_INVALID_ARGUMENT);
++    printf("query equivalence: %zu supported, %zu explicit unsupported results\n",
++           supported, unsupported);
++    redstone_state_destroy(&state);
++    redstone_plan_destroy(&plan);
++}
++
++typedef struct {
++    BlockPos pos;
++    StateId previous, current;
++} Write;
++typedef struct { Write *items; size_t count, capacity; } Trace;
++static void observe(void *context, BlockPos pos, BlockState previous, BlockState current)
++{
++    Trace *trace = context;
++    if (trace->count == trace->capacity) {
++        trace->capacity = trace->capacity ? trace->capacity*2 : 64;
++        trace->items = realloc(trace->items, trace->capacity*sizeof(*trace->items));
++        REQUIRE(trace->items);
++    }
++    Write *write = &trace->items[trace->count++];
++    write->pos = pos;
++    REQUIRE(state_encode(previous, &write->previous));
++    REQUIRE(state_encode(current, &write->current));
++}
++
++static void compare(World *a, World *b, Trace *ta, Trace *tb)
++{
++    REQUIRE(world_result(a) == RS_OK && world_result(b) == RS_OK);
++    REQUIRE(world_tick(a) == world_tick(b) && world_revision(a) == world_revision(b));
++    REQUIRE(ta->count == tb->count);
++    for (size_t i = 0; i < ta->count; ++i) {
++        Write x = ta->items[i], y = tb->items[i];
++        REQUIRE(x.pos.x == y.pos.x && x.pos.y == y.pos.y && x.pos.z == y.pos.z &&
++                x.previous == y.previous && x.current == y.current);
++    }
++    ta->count = tb->count = 0;
++    for (int x = MIN.x; x <= MAX.x; ++x)
++        for (int z = MIN.z; z <= MAX.z; ++z)
++            for (int y = MIN.y; y <= MAX.y; ++y) {
++                StateId first, second;
++                REQUIRE(state_encode(world_get(a, (BlockPos){x,y,z}), &first));
++                REQUIRE(state_encode(world_get(b, (BlockPos){x,y,z}), &second));
++                REQUIRE(first == second);
++            }
++    /* Equal visible states alone do not ensure equal future behavior. */
++    Scheduler *sa = &a->sim->scheduler, *sb = &b->sim->scheduler;
++    REQUIRE(sa->count == sb->count && sa->next_sequence == sb->next_sequence);
++    for (size_t i = 0; i < sa->count; ++i) {
++        ScheduledEvent x = sa->heap[i], y = sb->heap[i];
++        REQUIRE(x.due == y.due && x.sequence == y.sequence && x.block == y.block &&
++            x.priority == y.priority && x.pos.x == y.pos.x && x.pos.y == y.pos.y &&
++            x.pos.z == y.pos.z);
++    }
++}
++
++static void live_tests(const SimCModel *model, BlockPos min, bool fallback)
++{
++    static const BlockPos INPUTS[] = {{8,1,8}, {9,1,6}, {8,1,16}, {10,1,14}};
++    World *reference = fixture(), *compiled = fixture();
++    REQUIRE(sim_use_c(compiled, min, MAX, model) == RS_OK);
++    Trace a = {0}, b = {0};
++    world_set_change_observer(reference, observe, &a);
++    world_set_change_observer(compiled, observe, &b);
++    for (unsigned tick = 0; tick < 192; ++tick) {
++        for (size_t i = 0; i < sizeof(INPUTS)/sizeof(*INPUTS); ++i) {
++            bool value = ((tick / (i + 1)) >> i) & 1u;
++            world_set_lever_powered(reference, INPUTS[i], value);
++            world_set_lever_powered(compiled, INPUTS[i], value);
++            compare(reference, compiled, &a, &b);
++        }
++        if (tick % 11 == 0) {
++            (void)world_toggle_comparator_mode(reference, (BlockPos){10,1,16});
++            (void)world_toggle_comparator_mode(compiled, (BlockPos){10,1,16});
++            (void)world_cycle_repeater_delay(reference, (BlockPos){10,1,8});
++            (void)world_cycle_repeater_delay(compiled, (BlockPos){10,1,8});
++        }
++        if (tick % 13 == 0) {
++            REQUIRE(sim_use_reference(compiled) == RS_OK);
++            REQUIRE(sim_use_c(compiled, min, MAX, model) == RS_OK);
++        }
++        sim_advance_ticks(reference, 1);
++        sim_advance_ticks(compiled, 1);
++        compare(reference, compiled, &a, &b);
++        REQUIRE(sim_c_active(compiled));
++    }
++    SimStats stats = sim_stats(compiled);
++    REQUIRE(stats.c_evaluations > 0);
++    REQUIRE(fallback ? stats.cpu_fallbacks > 0 : stats.cpu_fallbacks == 0);
++    world_remove(compiled, (BlockPos){10,1,8});
++    REQUIRE(!sim_c_active(compiled));
++    sim_advance_ticks(compiled, 4);
++    REQUIRE(world_result(compiled) == RS_OK);
++    free(a.items); free(b.items);
++    world_destroy(reference); world_destroy(compiled);
++}
++
++static void attachment_tests(void)
++{
++    World *world = fixture();
++    REQUIRE(sim_use_c(world, MIN, MAX, &test_live) == RS_OK);
++    uint64_t revision = world_revision(world);
++    SimCModel bad = test_live;
++    bad.node_count++;
++    REQUIRE(sim_use_c(world, MIN, MAX, &bad) == RS_UNSUPPORTED);
++    REQUIRE(sim_c_active(world) && world_revision(world) == revision);
++    uint32_t *words = malloc(test_live.topology_word_count*sizeof(*words));
++    REQUIRE(words);
++    memcpy(words, test_live.topology, test_live.topology_word_count*sizeof(*words));
++    words[test_live.topology_word_count - 1] ^= 1;
++    bad = test_live; bad.topology = words;
++    REQUIRE(sim_use_c(world, MIN, MAX, &bad) == RS_UNSUPPORTED);
++    REQUIRE(sim_c_active(world));
++    free(words);
++    bad = test_live; bad.abi_version++;
++    REQUIRE(sim_use_c(world, MIN, MAX, &bad) == RS_INVALID_ARGUMENT);
++    REQUIRE(sim_use_c(world, MIN, MAX, NULL) == RS_INVALID_ARGUMENT);
++    const char *invalid_path = "build/c-codegen-invalid.c";
++    FILE *out = fopen(invalid_path, "w+");
++    REQUIRE(out);
++    REQUIRE(sim_write_c(world, MIN, MAX, out, "bad;symbol") == RS_INVALID_ARGUMENT);
++    REQUIRE(sim_write_c(world, MIN, MAX, out, "static") == RS_INVALID_ARGUMENT);
++    REQUIRE(ftell(out) == 0 && world_revision(world) == revision && sim_c_active(world));
++    REQUIRE(fclose(out) == 0);
++    REQUIRE(remove(invalid_path) == 0);
++    REQUIRE(sim_use_reference(world) == RS_OK);
++    REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
++    put(world, 9,1,8, BLOCK_REDSTONE_REPEATER, DIR_NORTH);
++    REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
++    REQUIRE(sim_use_cpu(world, MIN, MAX) == RS_OK);
++    REQUIRE(sim_use_c(world, MIN, MAX, &test_live) == RS_UNSUPPORTED);
++    REQUIRE(sim_cpu_active(world) && !sim_c_active(world));
++    world_destroy(world);
++    World *empty = world_create((WorldConfig){0});
++    REQUIRE(empty && sim_use_c(empty, MIN, MAX, &test_empty) == RS_OK);
++    REQUIRE(sim_c_active(empty));
++    sim_advance_ticks(empty, 2);
++    REQUIRE(world_result(empty) == RS_OK);
++    world_destroy(empty);
++}
++#endif
++
++int main(int argc, char **argv)
++{
++    if (argc == 3 && strcmp(argv[1], "--emit-c") == 0) return emit(argv[2]);
++#ifdef MCMUX_TEST_C
++    REQUIRE(argc == 1);
++    query_tests();
++    attachment_tests();
++    live_tests(&test_live, MIN, false);
++    live_tests(&test_boundary, (BlockPos){9,0,4}, true);
++    puts("generated C tests: PASS (queries, ordered writes, pending events, switching, fallback, invalidation)");
++    return 0;
++#else
++    fprintf(stderr, "run ./nob test-c\n");
++    return 2;
++#endif
++}
+diff --git a/tools/export_c.c b/tools/export_c.c
+new file mode 100644
+index 0000000..4000c79
+--- /dev/null
++++ b/tools/export_c.c
+@@ -0,0 +1,49 @@
++#include "mcmux.h"
++
++#include <limits.h>
++#include <string.h>
++
++int main(int argc, char **argv)
++{
++    if (argc != 3 && argc != 4) {
++        fprintf(stderr, "usage: %s INPUT.mcs OUTPUT.c [SYMBOL]\n", argv[0]);
++        return 2;
++    }
++    size_t length = strlen(argv[2]);
++    if (length < 3 || strcmp(argv[2] + length - 2, ".c") != 0) {
++        fprintf(stderr, "output must end in .c\n");
++        return 2;
++    }
++    StructureResult status;
++    Structure *structure = structure_read(argv[1], &status);
++    if (!structure) {
++        fprintf(stderr, "cannot read structure: %s\n", structure_result_name(status));
++        return 1;
++    }
++    StructureInfo info = structure_info(structure);
++    structure_destroy(structure);
++    int64_t x = (int64_t)info.origin.x + info.width - 1;
++    int64_t y = (int64_t)info.origin.y + info.height - 1;
++    int64_t z = (int64_t)info.origin.z + info.length - 1;
++    if (x > INT_MAX || y > INT_MAX || z > INT_MAX) return 1;
++    World *world = structure_load(argv[1], &status);
++    if (!world) {
++        fprintf(stderr, "cannot load structure: %s\n", structure_result_name(status));
++        return 1;
++    }
++    FILE *out = fopen(argv[2], "w");
++    if (!out) { world_destroy(world); return 1; }
++    RsResult result = sim_write_c(world, info.origin, (BlockPos){(int)x,(int)y,(int)z},
++                                  out, argc == 4 ? argv[3] : "mcmux_circuit");
++    bool ok = result == RS_OK;
++    if (fclose(out) != 0) ok = false;
++    world_destroy(world);
++    if (!ok) {
++        (void)remove(argv[2]);
++        fprintf(stderr, "C export failed: %s\n",
++                rs_result_name(result == RS_OK ? RS_IO_ERROR : result));
++        return 1;
++    }
++    printf("generated %s (model: %s)\n", argv[2], argc == 4 ? argv[3] : "mcmux_circuit");
++    return 0;
++}
+-- 
+2.51.1
+

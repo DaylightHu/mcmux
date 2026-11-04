@@ -1,5 +1,6 @@
 #include "sim_executor.h"
 #include "redstone_queue.h"
+#include "redstone_c.h"
 
 #include <stdlib.h>
 
@@ -152,6 +153,7 @@ typedef struct {
     uint64_t revision;
     uint32_t generation;
     bool valid;
+    const SimCModel *model;
 } CpuExecutor;
 
 static void cpu_destroy(SimExecutorHost *host, void *context)
@@ -259,9 +261,12 @@ static RsResult cpu_evaluate(SimExecutorHost *host, void *context, BlockPos pos,
         return RS_UNSUPPORTED;
     }
     RedstoneEvaluation value;
-    RsResult result = redstone_evaluate(&cpu->state, node, &value);
+    RsResult result = cpu->model ?
+        cpu->model->evaluate(cpu->state.blocks, node, &value) :
+        redstone_evaluate(&cpu->state, node, &value);
     if (result == RS_OK) {
         ++world->sim->stats.cpu_evaluations;
+        if (cpu->model) ++world->sim->stats.c_evaluations;
         cache->value = value;
         cache->cached = CPU_CACHE_VALUE;
         *output = value;
@@ -292,7 +297,8 @@ static RsResult backend_change_ready(const World *world)
     return world_result(world);
 }
 
-RsResult sim_use_cpu(World *world, BlockPos min, BlockPos max)
+static RsResult use_cpu(World *world, BlockPos min, BlockPos max,
+                         const SimCModel *model)
 {
     RsResult result = backend_change_ready(world);
     if (result != RS_OK) return result;
@@ -301,6 +307,11 @@ RsResult sim_use_cpu(World *world, BlockPos min, BlockPos max)
     if (!cpu) return RS_OUT_OF_MEMORY;
     result = redstone_plan_build(world, (RedstonePlanBounds){min, max}, &cpu->plan);
     if (result != RS_OK) goto fail;
+    if (model && !redstone_c_matches(&cpu->plan, model)) {
+        result = RS_UNSUPPORTED;
+        goto fail;
+    }
+    cpu->model = model;
     result = redstone_state_build(&cpu->plan, &cpu->state);
     if (result != RS_OK) goto fail;
     result = redstone_dirty_queue_prepare(&cpu->dirty, cpu->plan.node_count);
@@ -328,6 +339,34 @@ fail:
     return result;
 }
 
+RsResult sim_use_cpu(World *world, BlockPos min, BlockPos max)
+{
+    return use_cpu(world, min, max, NULL);
+}
+
+RsResult sim_use_c(World *world, BlockPos min, BlockPos max,
+                   const SimCModel *model)
+{
+    if (!model || model->abi_version != SIM_C_ABI_VERSION ||
+        !model->topology || !model->evaluate)
+        return RS_INVALID_ARGUMENT;
+    return use_cpu(world, min, max, model);
+}
+
+RsResult sim_write_c(const World *world, BlockPos min, BlockPos max,
+                     FILE *output, const char *symbol)
+{
+    if (!output || !symbol) return RS_INVALID_ARGUMENT;
+    RsResult result = backend_change_ready(world);
+    if (result != RS_OK) return result;
+    if (world->sim->piston_motions.active) return RS_UNSUPPORTED;
+    RedstonePlan plan = {0};
+    result = redstone_plan_build(world, (RedstonePlanBounds){min, max}, &plan);
+    if (result == RS_OK) result = redstone_c_write(&plan, output, symbol);
+    redstone_plan_destroy(&plan);
+    return result;
+}
+
 RsResult sim_use_reference(World *world)
 {
     RsResult result = backend_change_ready(world);
@@ -342,4 +381,11 @@ bool sim_cpu_active(const World *world)
 {
     return world && world->sim->executor.ops == &cpu_ops &&
            cpu_valid(world, world->sim->executor.context);
+}
+
+bool sim_c_active(const World *world)
+{
+    if (!sim_cpu_active(world)) return false;
+    const CpuExecutor *cpu = world->sim->executor.context;
+    return cpu->model != NULL;
 }

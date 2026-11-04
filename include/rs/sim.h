@@ -10,6 +10,7 @@ typedef struct {
     uint64_t rails_visited; /* Individual synchronous rail-state evaluations. */
     uint64_t rail_changes, events_processed;
     uint64_t cpu_evaluations, cpu_cache_hits, cpu_fallbacks;
+    uint64_t c_evaluations; /* Subset of cpu_evaluations executed as generated C. */
     size_t pending_events; /* Scheduled ticks, block events and active motions. */
 } SimStats;
 
