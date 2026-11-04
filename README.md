@@ -16,7 +16,9 @@ Use a C compiler to compile `nob.c` into the `nob` build runner. Then run the
 | `./nob gui` | Build the GUI. |
 | `./nob run` | Build and launch the GUI. |
 | `./nob reader` | Build the standalone `.mcs` structure reader. |
-| `./nob benchmark` | Run the deterministic redstone scaling benchmark. |
+| `./nob benchmark` | Generate C queries, compile them, and run the full redstone benchmark suite. |
+| `./nob test-c` | Generate, compile and test the C query backend. |
+| `./nob export-c INPUT.mcs OUTPUT.c [SYMBOL]` | Export an MCS circuit as a C query model. |
 | `./nob vendor-list` | List the vendored raylib files required by the build. |
 | `./nob precommit` | Stage the required raylib files and verify an index-only build. |
 | `./nob clean` | Remove build outputs. |
@@ -80,59 +82,6 @@ directory and its `.mcw` file use the same world name. Programs and structures
 belonging to that world can be stored beside the world file.
 
 The repository includes an example world at `saves/examples/`.
-
-## Optional CPU queries
-
-After loading or building a circuit, call
-`sim_use_cpu(world, min, max)` with inclusive region corners. This prepares a
-plan from the current blocks and enables cached input/target queries for dust,
-torches, repeaters and ordinary comparators. Actual notifications, delayed
-transitions and game-tick phases retain the existing simulation order.
-
-`sim_cpu_active(world)` reports whether the plan remains valid. Layout edits
-invalidate it; call `sim_use_cpu()` again to rebuild, or
-`sim_use_reference(world)` to release the plan. Unsupported queries, including
-container analog overrides and region boundaries, use reference queries.
-Other untracked revisions such as inventory or plot changes also invalidate
-the plan conservatively. Backend selection is per world and is not saved.
-
-`sim_stats(world)` includes `cpu_evaluations`, `cpu_cache_hits` and
-`cpu_fallbacks`. Only the selected query path executes; runtime comparison
-against the reference backend is not required. Preparation time and runtime
-overhead depend on the circuit, so enable this explicitly when measuring it.
-
-## Redstone scaling benchmark
-
-`./nob benchmark` runs the complete maintained benchmark suite with one
-command. The suite covers balanced, extremely parallel, extremely serial and
-sparse repeater layouts plus random and dense banks of the saved CSA cell. It
-prints one consolidated Markdown report and also writes the clean report to
-`build/benchmark-report.md`; build logs and progress remain outside that file.
-
-Useful modes:
-
-```sh
-./nob benchmark
-./nob benchmark --quick
-./nob benchmark --scenario csa-dense
-./nob benchmark --scenario csa-random --verbose
-./nob benchmark --list-scenarios
-```
-
-The full profile is intended for performance records; `--quick` runs the same
-scenario matrix with shorter durations and three timed pairs as a smoke test.
-`--rounds N`, `--seed N`, `--no-verify`, `--output PATH` and `--no-output`
-apply to the selected suite. Supplying `--cell`, `--width`, `--depth`,
-`--ticks`, `--period` or `--pattern` selects a custom single workload, so the
-older parameterized workflow remains available.
-
-Unless `--no-verify` is supplied, an untimed pass compares every output and
-the ordered state-write trace after every game tick for every scenario. Plan
-preparation is reported separately from measured execution. CPU results are
-rejected if the plan becomes inactive or any query falls back to the reference
-path. The report contains consolidated performance, correctness, backend and
-simulation-work tables followed by one machine-readable `RESULT` line per
-scenario. Add `--verbose` only when individual timed pairs are needed.
 
 ## References
 

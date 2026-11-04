@@ -2,6 +2,7 @@
 #define RS_REDSTONE_EVAL_H
 
 #include "redstone_plan.h"
+#include "rs/compiled.h"
 #include "blocks/block_internal.h"
 
 /* Independent block-state storage for one run. Pending ticks, torch burnout
@@ -21,10 +22,7 @@ typedef struct {
  * relay. A comparator's target_on gates its cache independently. A locked
  * repeater retains its current output. Torch burnout, scheduled events,
  * notifications and their order remain the executor's responsibility. */
-typedef struct {
-    uint8_t input, side, target_power;
-    bool target_on, locked;
-} RedstoneEvaluation;
+typedef SimCEvaluation RedstoneEvaluation;
 
 /* Copy the actual initial states retained by a plan into an empty destination.
  * No reset, settling pass, world write, event execution or tick advance. */

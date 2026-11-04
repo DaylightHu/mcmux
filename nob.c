@@ -36,6 +36,7 @@ static const char *common_sources[] = {
     "src/redstone_plan.c",
     "src/redstone_queue.c",
     "src/redstone_eval.c",
+    "src/redstone_c.c",
     "src/piston_motion.c",
     "src/block_updates.c",
     "src/wire_solver.c",
@@ -937,12 +938,14 @@ done:
     return ok;
 }
 
-static bool build_headless_tool(const char *source, const char *name, bool run)
+static bool build_headless_tool_flags(const char *source, const char *name,
+                                       bool run, const char *define)
 {
     if (!nob_mkdir_if_not_exists("build")) return false;
     const char *output=nob_temp_sprintf("build/%s%s",name,executable_suffix());
     Nob_Cmd command={0};
     nob_cmd_append(&command,compiler(),"-std=c11","-O2","-Wall","-Wextra","-Iinclude","-Isrc");
+    if (define) nob_cmd_append(&command, define, "-Ibuild");
     for (size_t i=0;i<NOB_ARRAY_LEN(common_sources);++i) nob_cmd_append(&command,common_sources[i]);
     nob_cmd_append(&command,source,"-o",output);
 #ifndef _WIN32
@@ -956,15 +959,48 @@ static bool build_headless_tool(const char *source, const char *name, bool run)
     return true;
 }
 
-static bool run_redstone_benchmark(int argc, char **argv)
+static bool build_headless_tool(const char *source, const char *name, bool run)
 {
-    if (!build_headless_tool("benchmarks/redstone_scaling.c",
-                             "redstone_scaling", false)) return false;
+    return build_headless_tool_flags(source, name, run, NULL);
+}
+
+/* The benchmark owns the AOT workflow; no separate benchmark command is needed.
+ * Compiler arguments are passed directly, never through a shell. Generated
+ * headers live in build/ and are regenerated on every run. */
+static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
+{
+    bool info_only = false;
+    if (benchmark) {
+        for (int i = 0; i < argc; ++i) {
+            if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h") ||
+                !strcmp(argv[i], "--list-scenarios"))
+                info_only = true;
+            if (!strcmp(argv[i], "--emit-c")) {
+                nob_log(NOB_ERROR, "benchmark manages --emit-c itself");
+                return false;
+            }
+        }
+    }
+    const char *source = benchmark ? "benchmarks/redstone_scaling.c" : "tests/c_codegen_test.c";
+    const char *generator = benchmark ? "redstone_scaling_generator" : "c_codegen_generator";
+    const char *binary = benchmark ? "redstone_scaling" : "c_codegen_test";
+    const char *header = benchmark ? "build/benchmark-models.h" : "build/test-c-models.h";
+    const char *define = benchmark ? "-DMCMUX_BENCHMARK_C" : "-DMCMUX_TEST_C";
+    if (!build_headless_tool(source, generator, false)) return false;
     Nob_Cmd command = {0};
-    nob_cmd_append(&command,
-        nob_temp_sprintf("build/redstone_scaling%s", executable_suffix()));
-    for (int index = 0; index < argc; ++index)
-        nob_cmd_append(&command, argv[index]);
+    nob_cmd_append(&command, nob_temp_sprintf("build/%s%s", generator, executable_suffix()));
+    for (int i = 0; i < argc; ++i) nob_cmd_append(&command, argv[i]);
+    if (info_only) return nob_cmd_run(&command);
+    nob_cmd_append(&command, "--emit-c", header);
+    if (!nob_cmd_run(&command)) return false;
+    uint64_t start = nob_nanos_since_unspecified_epoch();
+    if (!build_headless_tool_flags(source, binary, false, define)) return false;
+    double seconds = (double)(nob_nanos_since_unspecified_epoch() - start)/1e9;
+    nob_log(NOB_INFO, "AOT compile and link: %.3f s", seconds);
+    nob_cmd_append(&command, nob_temp_sprintf("build/%s%s", binary, executable_suffix()));
+    for (int i = 0; i < argc; ++i) nob_cmd_append(&command, argv[i]);
+    if (benchmark)
+        nob_cmd_append(&command, "--c-build-seconds", nob_temp_sprintf("%.9f", seconds));
     return nob_cmd_run(&command);
 }
 
@@ -979,7 +1015,9 @@ static void print_help(const char *program)
     printf("  precommit    Stage the exact raylib set and verify an index-only build\n");
     printf("  test         Build and run the structure persistence tests\n");
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
-    printf("  benchmark    Run the consolidated redstone benchmark suite\n");
+    printf("  benchmark    Generate C queries, compile and run the full redstone suite\n");
+    printf("  test-c       Generate, compile and test the C query backend\n");
+    printf("  export-c     Export INPUT.mcs OUTPUT.c [SYMBOL] as C query code\n");
     printf("  lib          Build build/libmcmux.a (no GUI dependencies)\n");
     printf("  build-c FILE Build a user C program linked with the simulation core\n");
     printf("  run-c FILE   Build and run a user C program from the repository root\n");
@@ -999,7 +1037,22 @@ int main(int argc, char **argv)
     if (strcmp(command,"reader")==0)
         return build_headless_tool("tools/inspect_structure.c","inspect_structure",false) ? 0 : 1;
     if (strcmp(command,"benchmark")==0)
-        return run_redstone_benchmark(argc, argv) ? 0 : 1;
+        return run_generated_c_tool(true, argc, argv) ? 0 : 1;
+    if (strcmp(command,"test-c")==0) {
+        if (argc) return 1;
+        return run_generated_c_tool(false, 0, NULL) ? 0 : 1;
+    }
+    if (strcmp(command,"export-c")==0) {
+        if (argc != 2 && argc != 3) {
+            nob_log(NOB_ERROR, "usage: %s export-c INPUT.mcs OUTPUT.c [SYMBOL]", program);
+            return 1;
+        }
+        if (!build_headless_tool("tools/export_c.c", "export_c", false)) return 1;
+        Nob_Cmd export = {0};
+        nob_cmd_append(&export, nob_temp_sprintf("build/export_c%s", executable_suffix()));
+        for (int i = 0; i < argc; ++i) nob_cmd_append(&export, argv[i]);
+        return nob_cmd_run(&export) ? 0 : 1;
+    }
     if (strcmp(command,"lib")==0) return build_core_library() ? 0 : 1;
     if (strcmp(command,"build-c")==0 || strcmp(command,"run-c")==0) {
         if (argc!=1) {

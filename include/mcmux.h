@@ -8,6 +8,7 @@
 #include "rs/session.h"
 #include "rs/structure.h"
 #include "rs/sim.h"
+#include "rs/compiled.h"
 
 /* Load an MCS structure with its saved anchor placed at anchor. On failure,
  * report the error and return NULL without terminating the host process. */
