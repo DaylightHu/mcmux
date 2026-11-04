@@ -964,42 +964,33 @@ static bool build_headless_tool(const char *source, const char *name, bool run)
     return build_headless_tool_flags(source, name, run, NULL);
 }
 
-static bool run_redstone_benchmark(int argc, char **argv)
-{
-    if (!build_headless_tool("benchmarks/redstone_scaling.c",
-                             "redstone_scaling", false)) return false;
-    Nob_Cmd command = {0};
-    nob_cmd_append(&command,
-        nob_temp_sprintf("build/redstone_scaling%s", executable_suffix()));
-    for (int index = 0; index < argc; ++index)
-        nob_cmd_append(&command, argv[index]);
-    return nob_cmd_run(&command);
-}
-
-/* Explicit AOT workflow. Compiler arguments are passed directly, never through
- * a shell. Generated headers live in build/ and are regenerated on every run. */
+/* The benchmark owns the AOT workflow; no separate benchmark command is needed.
+ * Compiler arguments are passed directly, never through a shell. Generated
+ * headers live in build/ and are regenerated on every run. */
 static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
 {
+    bool info_only = false;
     if (benchmark) {
         for (int i = 0; i < argc; ++i) {
             if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h") ||
                 !strcmp(argv[i], "--list-scenarios"))
-                return run_redstone_benchmark(argc, argv);
+                info_only = true;
             if (!strcmp(argv[i], "--emit-c")) {
-                nob_log(NOB_ERROR, "benchmark-c manages --emit-c itself");
+                nob_log(NOB_ERROR, "benchmark manages --emit-c itself");
                 return false;
             }
         }
     }
     const char *source = benchmark ? "benchmarks/redstone_scaling.c" : "tests/c_codegen_test.c";
-    const char *generator = benchmark ? "redstone_scaling" : "c_codegen_generator";
-    const char *binary = benchmark ? "redstone_scaling_aot" : "c_codegen_test";
-    const char *header = benchmark ? "build/benchmark-c-models.h" : "build/test-c-models.h";
+    const char *generator = benchmark ? "redstone_scaling_generator" : "c_codegen_generator";
+    const char *binary = benchmark ? "redstone_scaling" : "c_codegen_test";
+    const char *header = benchmark ? "build/benchmark-models.h" : "build/test-c-models.h";
     const char *define = benchmark ? "-DMCMUX_BENCHMARK_C" : "-DMCMUX_TEST_C";
     if (!build_headless_tool(source, generator, false)) return false;
     Nob_Cmd command = {0};
     nob_cmd_append(&command, nob_temp_sprintf("build/%s%s", generator, executable_suffix()));
     for (int i = 0; i < argc; ++i) nob_cmd_append(&command, argv[i]);
+    if (info_only) return nob_cmd_run(&command);
     nob_cmd_append(&command, "--emit-c", header);
     if (!nob_cmd_run(&command)) return false;
     uint64_t start = nob_nanos_since_unspecified_epoch();
@@ -1024,8 +1015,7 @@ static void print_help(const char *program)
     printf("  precommit    Stage the exact raylib set and verify an index-only build\n");
     printf("  test         Build and run the structure persistence tests\n");
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
-    printf("  benchmark    Run the consolidated redstone benchmark suite\n");
-    printf("  benchmark-c  Generate C queries, compile, then run the same suite\n");
+    printf("  benchmark    Generate C queries, compile and run the full redstone suite\n");
     printf("  test-c       Generate, compile and test the C query backend\n");
     printf("  export-c     Export INPUT.mcs OUTPUT.c [SYMBOL] as C query code\n");
     printf("  lib          Build build/libmcmux.a (no GUI dependencies)\n");
@@ -1047,8 +1037,6 @@ int main(int argc, char **argv)
     if (strcmp(command,"reader")==0)
         return build_headless_tool("tools/inspect_structure.c","inspect_structure",false) ? 0 : 1;
     if (strcmp(command,"benchmark")==0)
-        return run_redstone_benchmark(argc, argv) ? 0 : 1;
-    if (strcmp(command,"benchmark-c")==0)
         return run_generated_c_tool(true, argc, argv) ? 0 : 1;
     if (strcmp(command,"test-c")==0) {
         if (argc) return 1;

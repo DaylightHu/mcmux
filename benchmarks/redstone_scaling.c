@@ -15,7 +15,7 @@
 #include <string.h>
 
 #ifdef MCMUX_BENCHMARK_C
-#include "benchmark-c-models.h"
+#include "benchmark-models.h"
 static const SimCModel *selected_c_model;
 static const char *backend_name = "compiled C";
 #else
@@ -175,7 +175,8 @@ static void usage(const char *program)
 {
     printf("Usage: %s [options]\n\n", program);
     printf("Run the complete deterministic benchmark suite and produce one\n");
-    printf("Markdown report. With no options all maintained scenarios run.\n\n");
+    printf("Markdown report. Default: full profile, all maintained scenarios,\n");
+    printf("seven timed pairs and per-tick equivalence verification.\n\n");
     printf("Suite options:\n");
     printf("  --scenario NAME      Run one maintained scenario\n");
     printf("  --list-scenarios     List maintained scenario names\n");
@@ -186,7 +187,6 @@ static void usage(const char *program)
     printf("  --verbose            Include every timed pair in the report\n");
     printf("  --output PATH        Report path (default: build/benchmark-report.md)\n");
     printf("  --no-output          Print only; do not save a report file\n\n");
-    printf("  --emit-c PATH        Export selected query models instead of timing\n\n");
     printf("Custom workload options (select custom mode automatically):\n");
     printf("  --cell repeater|csa  Circuit cell (default: repeater)\n");
     printf("  --width N            Parallel lanes/cells (default: 64)\n");
