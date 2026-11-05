@@ -152,6 +152,8 @@ typedef struct {
     RedstoneNodeId *cells;
     size_t size_x, size_y, size_z;
     size_t references;
+    uint8_t *neighbor_masks; /* Shared callback masks include one-cell centers. */
+    size_t mask_nx, mask_ny, mask_nz;
 } CpuTopology;
 
 typedef struct CpuExecutor {
@@ -180,6 +182,7 @@ static void cpu_destroy(SimExecutorHost *host, void *context)
             redstone_plan_destroy(&cpu->topology->plan);
             free(cpu->topology->shape);
             free(cpu->topology->cells);
+            free(cpu->topology->neighbor_masks);
             free(cpu->topology);
         }
         free(cpu);
@@ -361,6 +364,39 @@ static RsResult cpu_evaluate(SimExecutorHost *host, void *context, BlockPos pos,
     return result;
 }
 
+static bool cpu_neighbor_mask(SimExecutorHost *host, void *context,
+                               BlockPos pos, uint8_t *mask)
+{
+    const World *world = host->world;
+    CpuExecutor *head = context, *cpu = head;
+    if (head->revision != world_revision(world)) return false;
+    if (head->next) {
+        if (head->recent && inside(head->recent->bounds, pos, 1)) cpu = head->recent;
+        else {
+            for (cpu = head; cpu; cpu = cpu->next)
+                if (inside(cpu->bounds, pos, 1)) break;
+        }
+    }
+    if (!cpu || !cpu_valid(world, cpu) || !cpu->topology->neighbor_masks) return false;
+    const CpuTopology *topology = cpu->topology;
+    uint64_t x = (uint64_t)((int64_t)pos.x - cpu->bounds.min.x + 1);
+    uint64_t y = (uint64_t)((int64_t)pos.y - cpu->bounds.min.y + 1);
+    uint64_t z = (uint64_t)((int64_t)pos.z - cpu->bounds.min.z + 1);
+    if (x >= topology->mask_nx || y >= topology->mask_ny || z >= topology->mask_nz)
+        return false;
+    *mask = topology->neighbor_masks[
+        ((size_t)y * topology->mask_nz + (size_t)z) * topology->mask_nx + (size_t)x];
+    return true;
+}
+
+bool sim_executor_neighbor_mask_active(const World *world, BlockPos center,
+                                       uint8_t *mask)
+{
+    SimExecutor *executor = &world->sim->executor;
+    SimExecutorHost host = {(World *)world};
+    return executor->ops->neighbor_mask(&host, executor->context, center, mask);
+}
+
 static const SimExecutorOps cpu_ops = {
     .flush = reference_flush,
     .scheduled_tick = reference_scheduled_tick,
@@ -368,7 +404,8 @@ static const SimExecutorOps cpu_ops = {
     .edit_state_changed = reference_edit_state_changed,
     .destroy = cpu_destroy,
     .stored = cpu_stored,
-    .evaluate = cpu_evaluate
+    .evaluate = cpu_evaluate,
+    .neighbor_mask = cpu_neighbor_mask
 };
 
 static RsResult backend_change_ready(const World *world)
@@ -390,6 +427,54 @@ static BlockState cpu_sample(const World *world, BlockPos origin,
     if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX ||
         z < INT_MIN || z > INT_MAX) return block_default(BLOCK_AIR);
     return world_get(world, (BlockPos){(int)x,(int)y,(int)z});
+}
+
+static void cpu_build_neighbor_masks(World *world, CpuExecutor *cpu)
+{
+    CpuTopology *topology = cpu->topology;
+    size_t nodes = topology->plan.node_count;
+    if (!nodes) return;
+    const uint64_t dimensions[] = {
+        (uint64_t)((int64_t)cpu->bounds.max.x - cpu->bounds.min.x + 3),
+        (uint64_t)((int64_t)cpu->bounds.max.y - cpu->bounds.min.y + 3),
+        (uint64_t)((int64_t)cpu->bounds.max.z - cpu->bounds.min.z + 3)
+    };
+    size_t count = 1;
+    for (size_t i = 0; i < 3; ++i) {
+        if (dimensions[i] > SIZE_MAX / count) return;
+        count *= (size_t)dimensions[i];
+    }
+    /* Optional and bounded: sparse regions and allocation failures keep the
+     * ordinary walk. Centers extend one cell; their targets stay within the
+     * same two-cell halo checked by shape matching and live invalidation. */
+    if (nodes <= SIZE_MAX / 16 && count > nodes * 16) return;
+    uint8_t *masks = malloc(count);
+    if (!masks) return;
+    static const BlockPos offsets[DIR_COUNT] = {
+        [DIR_EAST] = {1,0,0}, [DIR_WEST] = {-1,0,0},
+        [DIR_UP] = {0,1,0}, [DIR_DOWN] = {0,-1,0},
+        [DIR_SOUTH] = {0,0,1}, [DIR_NORTH] = {0,0,-1}
+    };
+    _Static_assert(DIR_COUNT <= 8, "neighbor mask fits one byte");
+    size_t index = 0;
+    for (size_t y = 0; y < dimensions[1]; ++y)
+        for (size_t z = 0; z < dimensions[2]; ++z)
+            for (size_t x = 0; x < dimensions[0]; ++x) {
+                uint8_t mask = 0;
+                for (unsigned direction = 0; direction < DIR_COUNT; ++direction) {
+                    BlockPos offset = offsets[direction];
+                    BlockState block = cpu_sample(world, cpu->bounds.min,
+                        (int64_t)x - 1 + offset.x, (int64_t)y - 1 + offset.y,
+                        (int64_t)z - 1 + offset.z);
+                    if (block_definition((BlockId)block.id)->neighbor_changed)
+                        mask |= 1u << direction;
+                }
+                masks[index++] = mask;
+            }
+    topology->neighbor_masks = masks;
+    topology->mask_nx = (size_t)dimensions[0];
+    topology->mask_ny = (size_t)dimensions[1];
+    topology->mask_nz = (size_t)dimensions[2];
 }
 
 static void cpu_build_lookup(CpuTopology *topology)
@@ -534,6 +619,9 @@ static RsResult use_cpu(World *world, BlockPos min, BlockPos max,
         goto fail;
     }
     cpu_build_lookup(cpu->topology);
+    cpu_build_neighbor_masks(world, cpu);
+    result = world_result(world);
+    if (result != RS_OK) goto fail;
     cpu->model = model;
     result = cpu_prepare(world, cpu, false);
     if (result != RS_OK) goto fail;

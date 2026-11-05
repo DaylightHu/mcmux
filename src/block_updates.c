@@ -1,4 +1,5 @@
 #include "sim_internal.h"
+#include "sim_executor.h"
 
 static const Direction neighbors[] = {
     DIR_WEST, DIR_EAST, DIR_DOWN, DIR_UP, DIR_NORTH, DIR_SOUTH
@@ -56,9 +57,23 @@ void sim_neighbor_changed(World *w, BlockPos pos)
 
 void sim_update_neighbors_at(World *w, BlockPos pos, Direction except)
 {
-    for (unsigned i = 0; i < DIR_COUNT; ++i)
-        if (neighbors[i] != except)
+    uint8_t mask = 0;
+    bool known = sim_executor_neighbor_mask(w, pos, &mask);
+    if (!known) {
+        for (unsigned i = 0; i < DIR_COUNT; ++i)
+            if (neighbors[i] != except)
+                sim_neighbor_changed(w, block_offset(pos, neighbors[i]));
+        return;
+    }
+    uint64_t revision = w->revision;
+    for (unsigned i = 0; i < DIR_COUNT; ++i) {
+        if (known && revision != w->revision) {
+            known = sim_executor_neighbor_mask(w, pos, &mask);
+            revision = w->revision;
+        }
+        if (neighbors[i] != except && (!known || (mask & (1u << neighbors[i]))))
             sim_neighbor_changed(w, block_offset(pos, neighbors[i]));
+    }
 }
 
 void sim_update_output_neighbors(World *w, BlockPos pos, Direction output)

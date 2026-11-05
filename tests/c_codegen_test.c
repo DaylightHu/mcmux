@@ -1,6 +1,7 @@
 #include "mcmux.h"
 #include "redstone_c.h"
 #include "sim_internal.h"
+#include "sim_executor.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -271,6 +272,69 @@ static void compare(World *a, World *b, Trace *ta, Trace *tb)
 }
 
 enum { SECOND_OFFSET = 40 };
+
+typedef struct {
+    World *world;
+    Trace trace;
+    bool edited;
+} NotificationEdit;
+
+static void notification_edit(void *context, BlockPos pos,
+                               BlockState previous, BlockState current)
+{
+    NotificationEdit *edit = context;
+    observe(&edit->trace, pos, previous, current);
+    if (!edit->edited && pos_equal(pos, (BlockPos){7,1,8}) &&
+        current.id == BLOCK_REDSTONE_LAMP && current.data.lamp.lit) {
+        edit->edited = true;
+        REQUIRE(world_set_block(edit->world, (BlockPos){9,1,8},
+            block_default(BLOCK_REDSTONE_LAMP), UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE));
+    }
+}
+
+static World *notification_fixture(void)
+{
+    World *world = world_create((WorldConfig){0});
+    REQUIRE(world && sim_set_updates_enabled(world, false) == RS_OK);
+    for (int x = 5; x <= 11; ++x)
+        for (int z = 6; z <= 10; ++z)
+            put(world, x,0,z, BLOCK_IRON, DIR_EAST);
+    put(world, 7,1,8, BLOCK_REDSTONE_LAMP, DIR_EAST);
+    put(world, 6,1,8, BLOCK_REDSTONE_BLOCK, DIR_EAST);
+    put(world, 10,1,8, BLOCK_REDSTONE_BLOCK, DIR_EAST);
+    REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
+    return world;
+}
+
+static void notification_tests(void)
+{
+    World *reference = notification_fixture(), *compiled = notification_fixture();
+    REQUIRE(sim_use_cpu(compiled, (BlockPos){5,0,6}, (BlockPos){11,2,10}) == RS_OK);
+    BlockPos center = {8,1,8};
+    uint8_t mask = 0;
+    REQUIRE(!sim_executor_neighbor_mask(reference, center, &mask));
+    REQUIRE(sim_executor_neighbor_mask(compiled, center, &mask));
+    REQUIRE(mask == (1u << DIR_WEST));
+    NotificationEdit a = {.world = reference}, b = {.world = compiled};
+    world_set_change_observer(reference, notification_edit, &a);
+    world_set_change_observer(compiled, notification_edit, &b);
+    sim_update_neighbors_at(reference, center, DIR_WEST);
+    sim_update_neighbors_at(compiled, center, DIR_WEST);
+    REQUIRE(!a.edited && !b.edited && !a.trace.count && !b.trace.count);
+    compare(reference, compiled, &a.trace, &b.trace);
+    /* The west callback lights its lamp. Its observer installs an east lamp,
+     * where the initial mask had no callback. Refresh before visiting east,
+     * without restarting the walk or changing the ordered writes. */
+    sim_update_neighbors_at(reference, center, DIR_COUNT);
+    sim_update_neighbors_at(compiled, center, DIR_COUNT);
+    REQUIRE(a.edited && b.edited && a.trace.count == 3 && b.trace.count == 3);
+    REQUIRE(world_get(compiled, (BlockPos){9,1,8}).data.lamp.lit);
+    REQUIRE(!sim_cpu_active(compiled));
+    REQUIRE(sim_stats(reference).neighbor_checks == sim_stats(compiled).neighbor_checks);
+    compare(reference, compiled, &a.trace, &b.trace);
+    free(a.trace.items); free(b.trace.items);
+    world_destroy(reference); world_destroy(compiled);
+}
 
 static World *pair_fixture(void)
 {
@@ -581,6 +645,7 @@ int main(int argc, char **argv)
     pair_tests(false);
     pair_tests(true);
     instance_attachment_tests();
+    notification_tests();
     puts("generated C tests: PASS (queries, ordered writes, pending events, switching, fallback, invalidation)");
     return 0;
 #else
