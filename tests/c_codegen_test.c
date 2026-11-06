@@ -547,6 +547,57 @@ static void instance_attachment_tests(void)
     world_destroy(world);
 }
 
+static void late_region_tests(void)
+{
+    /* Two regions share an index bucket; the final one crosses negative
+     * chunk coordinates. All worlds are built before the first attachment. */
+    static const int shifts[] = {0,24,38,80,-40};
+    World *worlds[] = {fixture(), fixture()};
+    for (size_t w = 0; w < 2; ++w) {
+        World *world = worlds[w];
+        REQUIRE(world_expand_plot(world, DIR_WEST, 1) == RS_OK);
+        REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
+        for (size_t i = 1; i < sizeof(shifts)/sizeof(*shifts); ++i)
+            for (int x = MIN.x; x <= MAX.x; ++x)
+                for (int y = MIN.y; y <= MAX.y; ++y)
+                    for (int z = MIN.z; z <= MAX.z; ++z) {
+                        BlockState state = world_get(world, (BlockPos){x,y,z});
+                        if (state.id != BLOCK_AIR)
+                            REQUIRE(world_set_block(world,
+                                (BlockPos){x + shifts[i],y,z}, state, UPDATE_CLIENTS));
+                    }
+        REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
+    }
+    World *reference = worlds[0], *compiled = worlds[1];
+    REQUIRE(sim_use_c(compiled, MIN, MAX, &test_live) == RS_OK);
+    Trace a = {0}, b = {0};
+    world_set_change_observer(reference, observe, &a);
+    world_set_change_observer(compiled, observe, &b);
+    for (size_t i = 1; i < sizeof(shifts)/sizeof(*shifts); ++i) {
+        BlockPos min = {MIN.x + shifts[i],MIN.y,MIN.z};
+        BlockPos max = {MAX.x + shifts[i],MAX.y,MAX.z};
+        /* After each run the routing index has been exercised. Both append
+         * paths must retire it before the next region can be looked up. */
+        REQUIRE((i == 3 ? sim_add_c(compiled, min, max, &test_live) :
+            sim_add_cpu_instance(compiled, MIN, min)) == RS_OK);
+        REQUIRE(sim_add_cpu_instance(compiled, MIN, min) == RS_INVALID_ARGUMENT);
+        sim_reset_stats(compiled);
+        BlockPos input = {8 + shifts[i],1,8};
+        world_set_lever_powered(reference, input, true);
+        world_set_lever_powered(compiled, input, true);
+        compare(reference, compiled, &a, &b);
+        sim_advance_ticks(reference, 8);
+        sim_advance_ticks(compiled, 8);
+        compare(reference, compiled, &a, &b);
+        REQUIRE(sim_stats(compiled).c_evaluations > 0);
+        REQUIRE(sim_stats(compiled).cpu_fallbacks == 0);
+        REQUIRE(world_get(compiled,
+            (BlockPos){9 + shifts[i],1,8}).data.repeater.powered);
+    }
+    free(a.items); free(b.items);
+    world_destroy(reference); world_destroy(compiled);
+}
+
 static void live_tests(const SimCModel *model, BlockPos min, bool fallback)
 {
     static const BlockPos INPUTS[] = {{8,1,8}, {9,1,6}, {8,1,16}, {10,1,14}};
@@ -646,6 +697,7 @@ int main(int argc, char **argv)
     pair_tests(true);
     instance_attachment_tests();
     notification_tests();
+    late_region_tests();
     puts("generated C tests: PASS (queries, ordered writes, pending events, switching, fallback, invalidation)");
     return 0;
 #else

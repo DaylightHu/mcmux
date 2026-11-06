@@ -947,6 +947,8 @@ static bool build_headless_tool_flags(const char *source, const char *name,
     nob_cmd_append(&command,compiler(),"-std=c11","-O2","-Wall","-Wextra","-Iinclude","-Isrc");
     if (define) nob_cmd_append(&command, define, "-Ibuild");
     for (size_t i=0;i<NOB_ARRAY_LEN(common_sources);++i) nob_cmd_append(&command,common_sources[i]);
+    if (define && !strcmp(source, "benchmarks/module_comparison.c"))
+        nob_cmd_append(&command, "build/module-baseline.c");
     nob_cmd_append(&command,source,"-o",output);
 #ifndef _WIN32
     nob_cmd_append(&command,"-lm");
@@ -964,12 +966,64 @@ static bool build_headless_tool(const char *source, const char *name, bool run)
     return build_headless_tool_flags(source, name, run, NULL);
 }
 
+static bool prepare_module_baseline(void)
+{
+    static const char revision[] = "65076784b80c6819d191deb18730564bfa7091f3";
+    static const char *const symbols[] = {
+        "sim_executor_init_reference", "sim_executor_destroy", "sim_executor_flush",
+        "sim_executor_scheduled_tick", "sim_executor_state_changed",
+        "sim_executor_edit_state_changed", "sim_executor_stored_active",
+        "sim_executor_evaluate_active", "sim_executor_neighbor_mask_active",
+        "sim_use_cpu", "sim_add_cpu", "sim_use_c", "sim_add_c",
+        "sim_add_cpu_instance", "sim_write_c", "sim_use_reference",
+        "sim_cpu_active", "sim_c_active"
+    };
+    Nob_Cmd command = {0};
+    nob_cmd_append(&command, "git", "show",
+        nob_temp_sprintf("%s:src/sim_executor.c", revision));
+    if (!nob_cmd_run(&command, .stdout_path = "build/module-baseline-source.c")) {
+        nob_log(NOB_ERROR, "baseline %s unavailable; comparison requires local Git history", revision);
+        return false;
+    }
+    Nob_String_Builder baseline = {0}, current = {0}, wrapper = {0};
+    bool ok = nob_read_entire_file("build/module-baseline-source.c", &baseline) &&
+              nob_read_entire_file("src/sim_executor.c", &current);
+    if (ok) {
+        for (size_t i = 0; i < NOB_ARRAY_LEN(symbols); ++i)
+            nob_sb_append_cstr(&wrapper, nob_temp_sprintf("#define %s baseline_%s\n",
+                                                       symbols[i], symbols[i]));
+        nob_da_append_many(&wrapper, baseline.items, baseline.count);
+        ok = nob_write_entire_file("build/module-baseline.c", wrapper.items, wrapper.count);
+        uint64_t fingerprint = UINT64_C(14695981039346656037);
+        for (size_t i = 0; i < current.count; ++i) {
+            fingerprint ^= (unsigned char)current.items[i];
+            fingerprint *= UINT64_C(1099511628211);
+        }
+        const char *meta = nob_temp_sprintf(
+            "#define MCMUX_BASELINE_EXECUTOR \"%s\"\n"
+            "#define MCMUX_CURRENT_EXECUTOR \"%016llx\"\n",
+            revision, (unsigned long long)fingerprint);
+        if (ok) ok = nob_write_entire_file("build/module-baseline-meta.h", meta, strlen(meta));
+    }
+    free(baseline.items); free(current.items); free(wrapper.items);
+    return ok;
+}
+
 /* The benchmark owns the AOT workflow; no separate benchmark command is needed.
  * Compiler arguments are passed directly, never through a shell. Generated
  * headers live in build/ and are regenerated on every run. */
 static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
 {
     bool info_only = false;
+    bool compare_modules = false;
+    if (benchmark) {
+        int count = 0;
+        for (int i = 0; i < argc; ++i) {
+            if (!strcmp(argv[i], "--compare-modules")) compare_modules = true;
+            else argv[count++] = argv[i];
+        }
+        argc = count;
+    }
     if (benchmark) {
         for (int i = 0; i < argc; ++i) {
             if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h") ||
@@ -981,9 +1035,12 @@ static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
             }
         }
     }
-    const char *source = benchmark ? "benchmarks/redstone_scaling.c" : "tests/c_codegen_test.c";
-    const char *generator = benchmark ? "redstone_scaling_generator" : "c_codegen_generator";
-    const char *binary = benchmark ? "redstone_scaling" : "c_codegen_test";
+    const char *source = compare_modules ? "benchmarks/module_comparison.c" :
+                         benchmark ? "benchmarks/redstone_scaling.c" : "tests/c_codegen_test.c";
+    const char *generator = compare_modules ? "module_comparison_generator" :
+                            benchmark ? "redstone_scaling_generator" : "c_codegen_generator";
+    const char *binary = compare_modules ? "module_comparison" :
+                         benchmark ? "redstone_scaling" : "c_codegen_test";
     const char *header = benchmark ? "build/benchmark-models.h" : "build/test-c-models.h";
     const char *define = benchmark ? "-DMCMUX_BENCHMARK_C" : "-DMCMUX_TEST_C";
     if (!build_headless_tool(source, generator, false)) return false;
@@ -993,6 +1050,7 @@ static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
     if (info_only) return nob_cmd_run(&command);
     nob_cmd_append(&command, "--emit-c", header);
     if (!nob_cmd_run(&command)) return false;
+    if (compare_modules && !prepare_module_baseline()) return false;
     uint64_t start = nob_nanos_since_unspecified_epoch();
     if (!build_headless_tool_flags(source, binary, false, define)) return false;
     double seconds = (double)(nob_nanos_since_unspecified_epoch() - start)/1e9;
@@ -1016,6 +1074,7 @@ static void print_help(const char *program)
     printf("  test         Build and run the structure persistence tests\n");
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
     printf("  benchmark    Generate C queries, compile and run the full redstone suite\n");
+    printf("               --compare-modules: one-command baseline/current module comparison\n");
     printf("  test-c       Generate, compile and test the C query backend\n");
     printf("  export-c     Export INPUT.mcs OUTPUT.c [SYMBOL] as C query code\n");
     printf("  lib          Build build/libmcmux.a (no GUI dependencies)\n");

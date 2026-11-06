@@ -3,6 +3,7 @@
 #include "redstone_c.h"
 
 #include <limits.h>
+#include <stddef.h>
 #include <stdlib.h>
 
 struct SimExecutorHost {
@@ -156,6 +157,8 @@ typedef struct {
     size_t mask_nx, mask_ny, mask_nz;
 } CpuTopology;
 
+typedef struct CpuRegionSet CpuRegionSet;
+
 typedef struct CpuExecutor {
     CpuTopology *topology;
     RedstonePlanBounds bounds;
@@ -164,20 +167,128 @@ typedef struct CpuExecutor {
     CpuNodeCache *cache;
     uint64_t revision;
     uint32_t generation;
-    bool valid;
+    bool valid, packed;
     const SimCModel *model;
-    struct CpuExecutor *next, *recent;
+    struct CpuExecutor *next;
+    CpuRegionSet *set; /* Only the list head owns multi-region metadata. */
 } CpuExecutor;
+
+typedef struct {
+    CpuExecutor *cpu;
+    size_t next;
+} CpuRegionLink;
+
+struct CpuRegionSet {
+    CpuExecutor *recent;
+    PosMap cells;
+    CpuRegionLink *links;
+    bool attempted;
+};
+
+static void cpu_regions_clear(CpuExecutor *head)
+{
+    CpuRegionSet *set = head->set;
+    if (!set) return;
+    posmap_destroy(&set->cells);
+    free(set->links);
+    set->links = NULL;
+    set->attempted = false;
+}
+
+static void cpu_regions_changed(CpuExecutor *head)
+{
+    if (!head->set) head->set = calloc(1, sizeof(*head->set));
+    cpu_regions_clear(head);
+}
+
+/* Chunks are only routing buckets; membership still uses exact region bounds. */
+static int cpu_region_axis(int coordinate)
+{
+    int key = coordinate / CHUNK_SIZE;
+    if (coordinate % CHUNK_SIZE < 0) --key;
+    return key;
+}
+
+static BlockPos cpu_region_key(BlockPos pos)
+{
+    return (BlockPos){cpu_region_axis(pos.x), cpu_region_axis(pos.y),
+                      cpu_region_axis(pos.z)};
+}
+
+static void cpu_regions_build(CpuExecutor *head)
+{
+    CpuRegionSet *set = head->set;
+    set->attempted = true;
+    size_t count = 0, references = 0;
+    for (CpuExecutor *cpu = head; cpu; cpu = cpu->next) {
+        if (count == SIZE_MAX / 16) return;
+        ++count;
+    }
+    /* An optional index with at most 16 bucket links per instance on average.
+     * Huge regions and allocation failures keep the original list lookup. */
+    size_t budget = count * 16;
+    for (CpuExecutor *cpu = head; cpu; cpu = cpu->next) {
+        BlockPos min = cpu_region_key(cpu->bounds.min);
+        BlockPos max = cpu_region_key(cpu->bounds.max);
+        size_t cells = 1;
+        const uint64_t dimensions[] = {
+            (uint64_t)((int64_t)max.x - min.x + 1),
+            (uint64_t)((int64_t)max.y - min.y + 1),
+            (uint64_t)((int64_t)max.z - min.z + 1)
+        };
+        for (size_t axis = 0; axis < 3; ++axis) {
+            if (dimensions[axis] > (budget - references) / cells) return;
+            cells *= (size_t)dimensions[axis];
+        }
+        references += cells;
+    }
+    if (count > SIZE_MAX / sizeof(CpuExecutor *) ||
+        references > SIZE_MAX / sizeof(CpuRegionLink)) return;
+    PosMap cells = {0};
+    CpuExecutor **ordered = malloc(count * sizeof(*ordered));
+    CpuRegionLink *links = malloc(references * sizeof(*links));
+    if (!ordered || !links || !posmap_reserve(&cells, references)) goto fail;
+    size_t i = 0;
+    for (CpuExecutor *cpu = head; cpu; cpu = cpu->next) ordered[i++] = cpu;
+    size_t next = 0;
+    /* Prepend in reverse attachment order so collisions retain list order. */
+    while (i) {
+        CpuExecutor *cpu = ordered[--i];
+        BlockPos min = cpu_region_key(cpu->bounds.min);
+        BlockPos max = cpu_region_key(cpu->bounds.max);
+        for (int y = min.y; y <= max.y; ++y)
+            for (int z = min.z; z <= max.z; ++z)
+                for (int x = min.x; x <= max.x; ++x) {
+                    BlockPos key = {x,y,z};
+                    size_t previous = SIZE_MAX;
+                    (void)posmap_get(&cells, key, &previous);
+                    links[next] = (CpuRegionLink){cpu, previous};
+                    if (!posmap_set(&cells, key, next++)) goto fail;
+                }
+    }
+    free(ordered);
+    set->cells = cells;
+    set->links = links;
+    return;
+fail:
+    posmap_destroy(&cells);
+    free(links);
+    free(ordered);
+}
 
 static void cpu_destroy(SimExecutorHost *host, void *context)
 {
     (void)host;
     CpuExecutor *cpu = context;
+    if (cpu) { cpu_regions_clear(cpu); free(cpu->set); }
     while (cpu) {
         CpuExecutor *next = cpu->next;
-        free(cpu->cache);
-        redstone_dirty_queue_destroy(&cpu->dirty);
-        redstone_state_destroy(&cpu->state);
+        if (cpu->packed) free(cpu->state.blocks);
+        else {
+            free(cpu->cache);
+            redstone_dirty_queue_destroy(&cpu->dirty);
+            redstone_state_destroy(&cpu->state);
+        }
         if (cpu->topology && !--cpu->topology->references) {
             redstone_plan_destroy(&cpu->topology->plan);
             free(cpu->topology->shape);
@@ -247,14 +358,39 @@ static void cpu_invalidate_all(CpuExecutor *head)
     for (CpuExecutor *cpu = head; cpu; cpu = cpu->next) cpu->valid = false;
 }
 
+/* Keep construction and full scans out of the common query's stack frame. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((noinline))
+#endif
+static CpuExecutor *cpu_region_miss(CpuExecutor *head, BlockPos pos)
+{
+    CpuRegionSet *set = head->set;
+    /* Build once on the first miss, after a set of attachments has settled. */
+    if (set && !set->attempted) cpu_regions_build(head);
+    if (set && set->links) {
+        size_t link;
+        if (!posmap_get(&set->cells, cpu_region_key(pos), &link)) return NULL;
+        while (link != SIZE_MAX) {
+            CpuRegionLink item = set->links[link];
+            if (inside(item.cpu->bounds, pos, 0)) return set->recent = item.cpu;
+            link = item.next;
+        }
+        return NULL;
+    }
+    for (CpuExecutor *cpu = head; cpu; cpu = cpu->next)
+        if (inside(cpu->bounds, pos, 0)) {
+            if (set) set->recent = cpu;
+            return cpu;
+        }
+    return NULL;
+}
+
 static CpuExecutor *cpu_region(CpuExecutor *head, BlockPos pos)
 {
-    if (!head->next) return head;
-    if (head->recent && inside(head->recent->bounds, pos, 0))
-        return head->recent;
-    for (CpuExecutor *cpu = head; cpu; cpu = cpu->next)
-        if (inside(cpu->bounds, pos, 0)) return head->recent = cpu;
-    return NULL;
+    CpuRegionSet *set = head->set;
+    if (set && set->recent && inside(set->recent->bounds, pos, 0))
+        return set->recent;
+    return cpu_region_miss(head, pos);
 }
 
 static bool cpu_find(const CpuExecutor *cpu, BlockPos pos, RedstoneNodeId *node)
@@ -295,7 +431,7 @@ static void cpu_stored(SimExecutorHost *host, void *context, BlockPos pos,
             if (inside(cpu->bounds, pos, 2)) cpu->valid = false;
         return;
     }
-    CpuExecutor *cpu = cpu_region(head, pos);
+    CpuExecutor *cpu = head->next ? cpu_region(head, pos) : head;
     if (!cpu || !cpu->valid) return;
     RedstoneNodeId node;
     if (!cpu_find(cpu, pos, &node)) return;
@@ -319,7 +455,7 @@ static RsResult cpu_evaluate(SimExecutorHost *host, void *context, BlockPos pos,
     World *world = host->world;
     CpuExecutor *head = context;
     if (head->revision != world_revision(world)) cpu_invalidate_all(head);
-    CpuExecutor *cpu = cpu_region(head, pos);
+    CpuExecutor *cpu = head->next ? cpu_region(head, pos) : head;
     if (!cpu) {
         ++world->sim->stats.cpu_fallbacks;
         return RS_UNSUPPORTED;
@@ -371,7 +507,8 @@ static bool cpu_neighbor_mask(SimExecutorHost *host, void *context,
     CpuExecutor *head = context, *cpu = head;
     if (head->revision != world_revision(world)) return false;
     if (head->next) {
-        if (head->recent && inside(head->recent->bounds, pos, 1)) cpu = head->recent;
+        CpuExecutor *recent = head->set ? head->set->recent : NULL;
+        if (recent && inside(recent->bounds, pos, 1)) cpu = recent;
         else {
             for (cpu = head; cpu; cpu = cpu->next)
                 if (inside(cpu->bounds, pos, 1)) break;
@@ -553,39 +690,75 @@ static RsResult cpu_shape(World *world, CpuExecutor *source,
     return world_result(world);
 }
 
+/* Lay out owned arrays with malloc-compatible alignment and checked sizes. */
+static bool cpu_state_array(size_t *bytes, size_t count, size_t stride,
+                              size_t *offset)
+{
+    size_t alignment = _Alignof(max_align_t);
+    size_t remainder = *bytes % alignment;
+    size_t padding = remainder ? alignment - remainder : 0;
+    if (padding > SIZE_MAX - *bytes) return false;
+    *offset = *bytes + padding;
+    if (count > (SIZE_MAX - *offset) / stride) return false;
+    *bytes = *offset + count * stride;
+    return true;
+}
+
+static RsResult cpu_instance_storage(World *world, CpuExecutor *cpu)
+{
+    const RedstonePlan *plan = &cpu->topology->plan;
+    size_t count = plan->node_count;
+    size_t bytes = 0, blocks, cache, items, queued;
+    if (!cpu_state_array(&bytes, count, sizeof(BlockState), &blocks) ||
+        !cpu_state_array(&bytes, count, sizeof(CpuNodeCache), &cache) ||
+        !cpu_state_array(&bytes, count, sizeof(RedstoneNodeId), &items) ||
+        !cpu_state_array(&bytes, count, sizeof(uint8_t), &queued))
+        return RS_OUT_OF_MEMORY;
+    unsigned char *storage = bytes ? calloc(1, bytes) : NULL;
+    if (bytes && !storage) return RS_OUT_OF_MEMORY;
+    cpu->packed = true;
+    cpu->state = (RedstoneState){plan, (BlockState *)storage, count};
+    if (storage) {
+        cpu->cache = (CpuNodeCache *)(storage + cache);
+        cpu->dirty = (RedstoneDirtyQueue){
+            .items = (RedstoneNodeId *)(storage + items),
+            .queued = storage + queued, .capacity = count
+        };
+    }
+    /* The graph was validated by its first state build. Values still come
+     * from this instance, and no state is shared between allocations. */
+    for (size_t i = 0; i < count; ++i) {
+        BlockPos pos = plan->nodes[i].pos;
+        cpu->state.blocks[i] = cpu_sample(world, cpu->bounds.min,
+            (int64_t)pos.x - plan->bounds.min.x,
+            (int64_t)pos.y - plan->bounds.min.y,
+            (int64_t)pos.z - plan->bounds.min.z);
+    }
+    return world_result(world);
+}
+
 static RsResult cpu_prepare(World *world, CpuExecutor *cpu, bool instance)
 {
     const RedstonePlan *plan = &cpu->topology->plan;
     RsResult result;
     if (instance) {
-        /* The shared graph was already validated by its first state build. */
-        BlockState *blocks = NULL;
+        result = cpu_instance_storage(world, cpu);
+        if (result != RS_OK) return result;
+    } else {
+        result = redstone_state_build(plan, &cpu->state);
+        if (result != RS_OK) return result;
+        result = redstone_dirty_queue_prepare(&cpu->dirty, plan->node_count);
+        if (result != RS_OK) return result;
         if (plan->node_count) {
-            blocks = malloc(plan->node_count * sizeof(*blocks));
-            if (!blocks) return RS_OUT_OF_MEMORY;
+            if (plan->node_count > SIZE_MAX / sizeof(*cpu->cache))
+                return RS_OUT_OF_MEMORY;
+            cpu->cache = calloc(plan->node_count, sizeof(*cpu->cache));
+            if (!cpu->cache) return RS_OUT_OF_MEMORY;
         }
-        cpu->state = (RedstoneState){plan, blocks, plan->node_count};
-        for (size_t i = 0; i < plan->node_count; ++i) {
-            BlockPos pos = plan->nodes[i].pos;
-            blocks[i] = cpu_sample(world, cpu->bounds.min,
-                (int64_t)pos.x - plan->bounds.min.x,
-                (int64_t)pos.y - plan->bounds.min.y,
-                (int64_t)pos.z - plan->bounds.min.z);
-        }
-        result = world_result(world);
-    } else result = redstone_state_build(plan, &cpu->state);
-    if (result != RS_OK) return result;
-    result = redstone_dirty_queue_prepare(&cpu->dirty, plan->node_count);
-    if (result != RS_OK) return result;
-    if (plan->node_count) {
-        if (plan->node_count > SIZE_MAX/sizeof(*cpu->cache))
-            return RS_OUT_OF_MEMORY;
-        cpu->cache = calloc(plan->node_count, sizeof(*cpu->cache));
-        if (!cpu->cache) return RS_OUT_OF_MEMORY;
-        for (size_t i = 0; i < plan->node_count; ++i)
-            if (!state_encode(cpu->state.blocks[i], &cpu->cache[i].block_state))
-                return RS_INTERNAL_ERROR;
     }
+    for (size_t i = 0; i < plan->node_count; ++i)
+        if (!state_encode(cpu->state.blocks[i], &cpu->cache[i].block_state))
+            return RS_INTERNAL_ERROR;
     cpu->revision = world_revision(world);
     cpu->valid = true;
     return RS_OK;
@@ -630,8 +803,10 @@ static RsResult use_cpu(World *world, BlockPos min, BlockPos max,
         if (head->revision != world_revision(world)) cpu_invalidate_all(head);
         head->revision = world_revision(world);
     }
-    if (tail) tail->next = cpu;
-    else {
+    if (tail) {
+        tail->next = cpu;
+        cpu_regions_changed(world->sim->executor.context);
+    } else {
         sim_executor_destroy(world);
         world->sim->executor = (SimExecutor){&cpu_ops, cpu};
     }
@@ -708,6 +883,7 @@ RsResult sim_add_cpu_instance(World *world, BlockPos prototype_min,
     result = cpu_prepare(world, cpu, true);
     if (result != RS_OK) { cpu_destroy(NULL, cpu); return result; }
     tail->next = cpu;
+    cpu_regions_changed(head);
     return RS_OK;
 }
 
