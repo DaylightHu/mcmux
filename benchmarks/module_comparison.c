@@ -45,8 +45,9 @@ static CsaLayout comparison_layout(size_t index)
 
 static void comparison_help(void)
 {
-    puts("Usage: ./nob benchmark --compare-modules [--quick] [--rounds N] [--verbose]\n"
+    puts("Usage: ./nob benchmark --compare-modules [--baseline REF] [--quick] [--rounds N] [--verbose]\n"
          "Compare baseline and current C executors in alternating order.\n"
+         "--baseline selects a local Git commit/ref (default: HEAD, before committing a patch).\n"
          "Includes the six unchanged default workloads and 4096 shared CSA modules.\n"
          "Both versions are checked against native reference execution.\n"
          "One report is saved automatically; the working tree is never switched.\n"
