@@ -1,7 +1,9 @@
 #include "mcmux.h"
 #include "redstone_c.h"
 #include "sim_internal.h"
+#include "sim_executor.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -269,6 +271,333 @@ static void compare(World *a, World *b, Trace *ta, Trace *tb)
     }
 }
 
+enum { SECOND_OFFSET = 40 };
+
+typedef struct {
+    World *world;
+    Trace trace;
+    bool edited;
+} NotificationEdit;
+
+static void notification_edit(void *context, BlockPos pos,
+                               BlockState previous, BlockState current)
+{
+    NotificationEdit *edit = context;
+    observe(&edit->trace, pos, previous, current);
+    if (!edit->edited && pos_equal(pos, (BlockPos){7,1,8}) &&
+        current.id == BLOCK_REDSTONE_LAMP && current.data.lamp.lit) {
+        edit->edited = true;
+        REQUIRE(world_set_block(edit->world, (BlockPos){9,1,8},
+            block_default(BLOCK_REDSTONE_LAMP), UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE));
+    }
+}
+
+static World *notification_fixture(void)
+{
+    World *world = world_create((WorldConfig){0});
+    REQUIRE(world && sim_set_updates_enabled(world, false) == RS_OK);
+    for (int x = 5; x <= 11; ++x)
+        for (int z = 6; z <= 10; ++z)
+            put(world, x,0,z, BLOCK_IRON, DIR_EAST);
+    put(world, 7,1,8, BLOCK_REDSTONE_LAMP, DIR_EAST);
+    put(world, 6,1,8, BLOCK_REDSTONE_BLOCK, DIR_EAST);
+    put(world, 10,1,8, BLOCK_REDSTONE_BLOCK, DIR_EAST);
+    REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
+    return world;
+}
+
+static void notification_tests(void)
+{
+    World *reference = notification_fixture(), *compiled = notification_fixture();
+    REQUIRE(sim_use_cpu(compiled, (BlockPos){5,0,6}, (BlockPos){11,2,10}) == RS_OK);
+    BlockPos center = {8,1,8};
+    uint8_t mask = 0;
+    REQUIRE(!sim_executor_neighbor_mask(reference, center, &mask));
+    REQUIRE(sim_executor_neighbor_mask(compiled, center, &mask));
+    REQUIRE(mask == (1u << DIR_WEST));
+    NotificationEdit a = {.world = reference}, b = {.world = compiled};
+    world_set_change_observer(reference, notification_edit, &a);
+    world_set_change_observer(compiled, notification_edit, &b);
+    sim_update_neighbors_at(reference, center, DIR_WEST);
+    sim_update_neighbors_at(compiled, center, DIR_WEST);
+    REQUIRE(!a.edited && !b.edited && !a.trace.count && !b.trace.count);
+    compare(reference, compiled, &a.trace, &b.trace);
+    /* The west callback lights its lamp. Its observer installs an east lamp,
+     * where the initial mask had no callback. Refresh before visiting east,
+     * without restarting the walk or changing the ordered writes. */
+    sim_update_neighbors_at(reference, center, DIR_COUNT);
+    sim_update_neighbors_at(compiled, center, DIR_COUNT);
+    REQUIRE(a.edited && b.edited && a.trace.count == 3 && b.trace.count == 3);
+    REQUIRE(world_get(compiled, (BlockPos){9,1,8}).data.lamp.lit);
+    REQUIRE(!sim_cpu_active(compiled));
+    REQUIRE(sim_stats(reference).neighbor_checks == sim_stats(compiled).neighbor_checks);
+    compare(reference, compiled, &a.trace, &b.trace);
+    free(a.trace.items); free(b.trace.items);
+    world_destroy(reference); world_destroy(compiled);
+}
+
+static World *pair_fixture(void)
+{
+    World *world = fixture();
+    REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
+    for (int x = MIN.x; x <= MAX.x; ++x)
+        for (int y = MIN.y; y <= MAX.y; ++y)
+            for (int z = MIN.z; z <= MAX.z; ++z) {
+                BlockPos source = {x,y,z};
+                BlockState state = world_get(world, source);
+                if (state.id != BLOCK_AIR)
+                    REQUIRE(world_set_block(world,
+                        (BlockPos){x + SECOND_OFFSET,y,z}, state, UPDATE_CLIENTS));
+            }
+    REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
+    return world;
+}
+
+static void pair_tests(bool shared)
+{
+    static const BlockPos INPUTS[] = {{8,1,8}, {9,1,6}, {8,1,16}, {10,1,14}};
+    BlockPos min = {MIN.x + SECOND_OFFSET, MIN.y, MIN.z};
+    BlockPos max = {MAX.x + SECOND_OFFSET, MAX.y, MAX.z};
+    World *reference = pair_fixture(), *compiled = pair_fixture();
+    REQUIRE(sim_use_c(compiled, MIN, MAX, &test_live) == RS_OK);
+    REQUIRE((shared ? sim_add_cpu_instance(compiled, MIN, min) :
+             sim_add_c(compiled, min, max, &test_live)) == RS_OK);
+    REQUIRE(sim_add_c(compiled, MIN, MAX, &test_live) == RS_INVALID_ARGUMENT);
+    Trace a = {0}, b = {0};
+    world_set_change_observer(reference, observe, &a);
+    world_set_change_observer(compiled, observe, &b);
+    for (unsigned tick = 0; tick < 128; ++tick) {
+        for (unsigned instance = 0; instance < 2; ++instance) {
+            unsigned i = (tick + instance) % 4;
+            BlockPos pos = INPUTS[i];
+            pos.x += instance * SECOND_OFFSET;
+            bool value = ((tick / (i + 1)) >> instance) & 1u;
+            world_set_lever_powered(reference, pos, value);
+            world_set_lever_powered(compiled, pos, value);
+            compare(reference, compiled, &a, &b);
+        }
+        if (tick % 13 == 0) {
+            BlockPos pos = {10 + (tick / 13 % 2) * SECOND_OFFSET, 1, 16};
+            REQUIRE(world_toggle_comparator_mode(reference, pos) ==
+                    world_toggle_comparator_mode(compiled, pos));
+        }
+        sim_advance_ticks(reference, 1);
+        sim_advance_ticks(compiled, 1);
+        compare(reference, compiled, &a, &b);
+        for (int x = min.x; x <= max.x; ++x)
+            for (int z = min.z; z <= max.z; ++z)
+                for (int y = min.y; y <= max.y; ++y) {
+                    StateId first, second;
+                    REQUIRE(state_encode(world_get(reference, (BlockPos){x,y,z}), &first));
+                    REQUIRE(state_encode(world_get(compiled, (BlockPos){x,y,z}), &second));
+                    REQUIRE(first == second);
+                }
+    }
+    REQUIRE(sim_stats(compiled).c_evaluations > 0);
+    BlockPos removed = {10,1,8};
+    world_remove(reference, removed);
+    world_remove(compiled, removed);
+    compare(reference, compiled, &a, &b);
+    REQUIRE(sim_c_active(compiled)); /* Second instance is still attached. */
+    sim_reset_stats(compiled);
+    BlockPos second_input = {8 + SECOND_OFFSET,1,8};
+    world_set_lever_powered(reference, second_input, false);
+    world_set_lever_powered(compiled, second_input, false);
+    compare(reference, compiled, &a, &b);
+    world_set_lever_powered(reference, second_input, true);
+    world_set_lever_powered(compiled, second_input, true);
+    sim_advance_ticks(reference, 4);
+    sim_advance_ticks(compiled, 4);
+    compare(reference, compiled, &a, &b);
+    REQUIRE(sim_stats(compiled).c_evaluations > 0);
+    free(a.items); free(b.items);
+    world_destroy(reference); world_destroy(compiled);
+
+    /* Regions may also choose different query backends. */
+    reference = pair_fixture(); compiled = pair_fixture();
+    REQUIRE(sim_use_c(compiled, MIN, MAX, &test_live) == RS_OK);
+    REQUIRE(sim_add_cpu(compiled, min, max) == RS_OK);
+    a = (Trace){0}; b = (Trace){0};
+    world_set_change_observer(reference, observe, &a);
+    world_set_change_observer(compiled, observe, &b);
+    world_set_lever_powered(reference, (BlockPos){8 + SECOND_OFFSET,1,8}, true);
+    world_set_lever_powered(compiled, (BlockPos){8 + SECOND_OFFSET,1,8}, true);
+    sim_advance_ticks(reference, 4);
+    sim_advance_ticks(compiled, 4);
+    compare(reference, compiled, &a, &b);
+    REQUIRE(sim_cpu_active(compiled) && sim_c_active(compiled));
+    REQUIRE(sim_stats(compiled).cpu_evaluations > 0);
+    free(a.items); free(b.items);
+    world_destroy(reference); world_destroy(compiled);
+}
+
+static void instance_attachment_tests(void)
+{
+    const BlockPos min = {MIN.x + SECOND_OFFSET, MIN.y, MIN.z};
+    World *world = pair_fixture();
+    REQUIRE(sim_use_c(world, MIN, MAX, &test_live) == RS_OK);
+    uint64_t tick = world_tick(world), revision = world_revision(world);
+    size_t events = sim_stats(world).pending_events;
+    REQUIRE(sim_add_cpu_instance(world, MIN, MIN) == RS_INVALID_ARGUMENT);
+    REQUIRE(sim_add_cpu_instance(world, MIN, (BlockPos){INT_MAX,0,0}) == RS_OUT_OF_BOUNDS);
+    REQUIRE(sim_add_cpu_instance(world, (BlockPos){0,0,0}, min) == RS_UNSUPPORTED);
+    REQUIRE(world_tick(world) == tick && world_revision(world) == revision &&
+            sim_stats(world).pending_events == events && sim_c_active(world));
+
+    /* An extra block in template air, and an external dependency two cells
+     * away, must both reject an instance without disabling its prototype. */
+    BlockPos extra = {MIN.x + SECOND_OFFSET,1,MIN.z};
+    REQUIRE(world_set_block(world, extra, block_default(BLOCK_IRON), UPDATE_CLIENTS));
+    REQUIRE(sim_add_cpu_instance(world, MIN, min) == RS_UNSUPPORTED);
+    REQUIRE(sim_c_active(world));
+    world_remove(world, extra);
+    BlockPos halo = {MAX.x + SECOND_OFFSET + 2,1,MAX.z};
+    REQUIRE(world_set_block(world, halo, block_default(BLOCK_IRON), UPDATE_CLIENTS));
+    REQUIRE(sim_add_cpu_instance(world, MIN, min) == RS_UNSUPPORTED);
+    world_remove(world, halo);
+    REQUIRE(sim_add_cpu_instance(world, MIN, min) == RS_OK);
+
+    /* Reusing a shared instance as the next prototype retains the same graph.
+     * Build the next translated fixture before attempting its attachment. */
+    REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
+    for (int x = MIN.x; x <= MAX.x; ++x)
+        for (int y = MIN.y; y <= MAX.y; ++y)
+            for (int z = MIN.z; z <= MAX.z; ++z) {
+                BlockState state = world_get(world, (BlockPos){x,y,z});
+                if (state.id != BLOCK_AIR)
+                    REQUIRE(world_set_block(world,
+                        (BlockPos){x + 2 * SECOND_OFFSET,y,z}, state, UPDATE_CLIENTS));
+            }
+    REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
+    REQUIRE(sim_add_cpu_instance(world, min,
+        (BlockPos){MIN.x + 2 * SECOND_OFFSET,MIN.y,MIN.z}) == RS_OK);
+    BlockPos source_halo = {MAX.x + 2,1,MAX.z};
+    REQUIRE(world_set_block(world, source_halo, block_default(BLOCK_IRON), UPDATE_CLIENTS));
+    REQUIRE(sim_add_cpu_instance(world, MIN, (BlockPos){MIN.x + 120,0,MIN.z}) == RS_UNSUPPORTED);
+    REQUIRE(sim_c_active(world));
+    REQUIRE(sim_use_reference(world) == RS_OK);
+    REQUIRE(!sim_cpu_active(world));
+    world_destroy(world);
+
+    /* Empty shared graphs still have a lifetime and an independently checked
+     * footprint. No zero-sized allocations may be treated as a failure. */
+    world = world_create((WorldConfig){0});
+    REQUIRE(world && sim_use_cpu(world, MIN, MAX) == RS_OK);
+    REQUIRE(sim_add_cpu_instance(world, MIN, min) == RS_OK);
+    REQUIRE(sim_cpu_active(world));
+    world_destroy(world);
+
+    /* Translation across zero and to a different height uses the same node
+     * indices, while loading the destination's own dynamic block states. */
+    world = fixture();
+    REQUIRE(world_expand_plot(world, DIR_WEST, 1) == RS_OK);
+    REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
+    const BlockPos shift = {-40,-16,32};
+    for (int x = MIN.x; x <= MAX.x; ++x)
+        for (int y = MIN.y; y <= MAX.y; ++y)
+            for (int z = MIN.z; z <= MAX.z; ++z) {
+                BlockState state = world_get(world, (BlockPos){x,y,z});
+                if (state.id != BLOCK_AIR)
+                    REQUIRE(world_set_block(world,
+                        (BlockPos){x+shift.x,y+shift.y,z+shift.z}, state, UPDATE_CLIENTS));
+            }
+    REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
+    REQUIRE(sim_use_c(world, MIN, MAX, &test_live) == RS_OK);
+    REQUIRE(sim_add_cpu_instance(world, MIN,
+        (BlockPos){MIN.x+shift.x,MIN.y+shift.y,MIN.z+shift.z}) == RS_OK);
+    world_set_lever_powered(world, (BlockPos){8+shift.x,1+shift.y,8+shift.z}, true);
+    sim_advance_ticks(world, 8);
+    REQUIRE(world_result(world) == RS_OK && sim_stats(world).c_evaluations > 0);
+    REQUIRE(world_get(world, (BlockPos){9+shift.x,1+shift.y,8+shift.z}).data.repeater.powered);
+    REQUIRE(!world_get(world, (BlockPos){9,1,8}).data.repeater.powered);
+    world_destroy(world);
+
+    world = pair_fixture();
+    world_set_lever_powered(world, (BlockPos){8+SECOND_OFFSET,1,8}, true);
+    events = sim_stats(world).pending_events;
+    REQUIRE(events > 0 && sim_use_c(world, MIN, MAX, &test_live) == RS_OK);
+    REQUIRE(sim_add_cpu_instance(world, MIN, min) == RS_OK);
+    REQUIRE(sim_stats(world).pending_events == events);
+    sim_advance_ticks(world, 8);
+    REQUIRE(world_result(world) == RS_OK && sim_stats(world).c_evaluations > 0);
+    REQUIRE(world_get(world, (BlockPos){9+SECOND_OFFSET,1,8}).data.repeater.powered);
+    REQUIRE(!world_get(world, (BlockPos){9,1,8}).data.repeater.powered);
+    world_destroy(world);
+
+    /* A large sparse region keeps the position-map path instead of allocating
+     * a dense table larger than that map. The same state rules still apply. */
+    world = fixture();
+    REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
+    for (int x = MIN.x; x <= MAX.x; ++x)
+        for (int y = MIN.y; y <= MAX.y; ++y)
+            for (int z = MIN.z; z <= MAX.z; ++z) {
+                BlockState state = world_get(world, (BlockPos){x,y,z});
+                if (state.id != BLOCK_AIR)
+                    REQUIRE(world_set_block(world, (BlockPos){x+200,y,z}, state, UPDATE_CLIENTS));
+            }
+    REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
+    REQUIRE(sim_use_cpu(world, (BlockPos){0,0,0}, (BlockPos){100,1,100}) == RS_OK);
+    REQUIRE(sim_add_cpu_instance(world, (BlockPos){0,0,0}, (BlockPos){200,0,0}) == RS_OK);
+    world_set_lever_powered(world, (BlockPos){208,1,8}, true);
+    sim_advance_ticks(world, 8);
+    REQUIRE(world_result(world) == RS_OK && sim_cpu_active(world));
+    REQUIRE(sim_stats(world).cpu_evaluations > 0 && sim_stats(world).cpu_fallbacks == 0);
+    REQUIRE(world_get(world, (BlockPos){209,1,8}).data.repeater.powered);
+    REQUIRE(!world_get(world, (BlockPos){9,1,8}).data.repeater.powered);
+    world_destroy(world);
+}
+
+static void late_region_tests(void)
+{
+    /* Two regions share an index bucket; the final one crosses negative
+     * chunk coordinates. All worlds are built before the first attachment. */
+    static const int shifts[] = {0,24,38,80,-40};
+    World *worlds[] = {fixture(), fixture()};
+    for (size_t w = 0; w < 2; ++w) {
+        World *world = worlds[w];
+        REQUIRE(world_expand_plot(world, DIR_WEST, 1) == RS_OK);
+        REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
+        for (size_t i = 1; i < sizeof(shifts)/sizeof(*shifts); ++i)
+            for (int x = MIN.x; x <= MAX.x; ++x)
+                for (int y = MIN.y; y <= MAX.y; ++y)
+                    for (int z = MIN.z; z <= MAX.z; ++z) {
+                        BlockState state = world_get(world, (BlockPos){x,y,z});
+                        if (state.id != BLOCK_AIR)
+                            REQUIRE(world_set_block(world,
+                                (BlockPos){x + shifts[i],y,z}, state, UPDATE_CLIENTS));
+                    }
+        REQUIRE(sim_set_updates_enabled(world, true) == RS_OK);
+    }
+    World *reference = worlds[0], *compiled = worlds[1];
+    REQUIRE(sim_use_c(compiled, MIN, MAX, &test_live) == RS_OK);
+    Trace a = {0}, b = {0};
+    world_set_change_observer(reference, observe, &a);
+    world_set_change_observer(compiled, observe, &b);
+    for (size_t i = 1; i < sizeof(shifts)/sizeof(*shifts); ++i) {
+        BlockPos min = {MIN.x + shifts[i],MIN.y,MIN.z};
+        BlockPos max = {MAX.x + shifts[i],MAX.y,MAX.z};
+        /* After each run the routing index has been exercised. Both append
+         * paths must retire it before the next region can be looked up. */
+        REQUIRE((i == 3 ? sim_add_c(compiled, min, max, &test_live) :
+            sim_add_cpu_instance(compiled, MIN, min)) == RS_OK);
+        REQUIRE(sim_add_cpu_instance(compiled, MIN, min) == RS_INVALID_ARGUMENT);
+        sim_reset_stats(compiled);
+        BlockPos input = {8 + shifts[i],1,8};
+        world_set_lever_powered(reference, input, true);
+        world_set_lever_powered(compiled, input, true);
+        compare(reference, compiled, &a, &b);
+        sim_advance_ticks(reference, 8);
+        sim_advance_ticks(compiled, 8);
+        compare(reference, compiled, &a, &b);
+        REQUIRE(sim_stats(compiled).c_evaluations > 0);
+        REQUIRE(sim_stats(compiled).cpu_fallbacks == 0);
+        REQUIRE(world_get(compiled,
+            (BlockPos){9 + shifts[i],1,8}).data.repeater.powered);
+    }
+    free(a.items); free(b.items);
+    world_destroy(reference); world_destroy(compiled);
+}
+
 static void live_tests(const SimCModel *model, BlockPos min, bool fallback)
 {
     static const BlockPos INPUTS[] = {{8,1,8}, {9,1,6}, {8,1,16}, {10,1,14}};
@@ -364,6 +693,11 @@ int main(int argc, char **argv)
     attachment_tests();
     live_tests(&test_live, MIN, false);
     live_tests(&test_boundary, (BlockPos){9,0,4}, true);
+    pair_tests(false);
+    pair_tests(true);
+    instance_attachment_tests();
+    notification_tests();
+    late_region_tests();
     puts("generated C tests: PASS (queries, ordered writes, pending events, switching, fallback, invalidation)");
     return 0;
 #else

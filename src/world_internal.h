@@ -28,9 +28,12 @@ struct World {
     Simulator *sim;
     WorldChangeObserver observer;
     void *observer_context;
-    uint64_t read_stamp, external_power_stamp;
+    uint64_t read_stamp, read_cache_stamp, external_power_stamp;
     WorldReadEntry reads[WORLD_READ_CACHE_SIZE];
     WirePowerEntry wire_powers[WORLD_READ_CACHE_SIZE];
+    BlockPos recent_chunk_key;
+    Chunk *recent_chunk;
+    uint64_t recent_chunk_stamp;
     RsResult action_error;
     bool action_error_recoverable;
     char action_error_message[512];

@@ -47,10 +47,16 @@ static FILE *open_backing_file(void)
 }
 
 WorldConfig world_config_default(void) { return (WorldConfig){.ground_layers = 1}; }
-static void invalidate_reads(World *w, bool wire_properties_only)
+static size_t read_slot(BlockPos p)
+{
+    uint32_t hash = (uint32_t)p.x*0x9e3779b1u ^ (uint32_t)p.y*0x85ebca6bu ^
+                    (uint32_t)p.z*0xc2b2ae35u;
+    return hash & (WORLD_READ_CACHE_SIZE - 1);
+}
+
+static void invalidate_wire_powers(World *w, bool wire_properties_only)
 {
     if (!++w->read_stamp) {
-        memset(w->reads, 0, sizeof(w->reads));
         memset(w->wire_powers, 0, sizeof(w->wire_powers));
         w->read_stamp = 1;
     }
@@ -61,6 +67,16 @@ static void invalidate_reads(World *w, bool wire_properties_only)
         memset(w->wire_powers, 0, sizeof(w->wire_powers));
         w->external_power_stamp = 1;
     }
+}
+static void invalidate_reads(World *w, bool wire_properties_only)
+{
+    /* Chunk insertion and plot changes can alter generated block values. */
+    if (!++w->read_cache_stamp) {
+        memset(w->reads, 0, sizeof(w->reads));
+        w->read_cache_stamp = 1;
+        w->recent_chunk_stamp = 0;
+    }
+    invalidate_wire_powers(w, wire_properties_only);
 }
 static BlockPos chunk_key(BlockPos p) { return (BlockPos){floor_div16(p.x), 0, floor_div16(p.z)}; }
 bool world_plot_bounds_valid(WorldPlotBounds b)
@@ -174,6 +190,7 @@ World *world_create(WorldConfig config)
     w->plot = (WorldPlotBounds){0, 0, WORLD_PLOT_SIZE - 1,
                                WORLD_PLOT_SIZE - 1};
     w->read_stamp = 1;
+    w->read_cache_stamp = 1;
     w->external_power_stamp = 1;
     if (!sim_init_internal(w)) { world_destroy(w); return NULL; }
     return w;
@@ -490,16 +507,26 @@ RsResult world_shrink_plot(World *w, Direction direction, uint32_t count)
 BlockState world_get(const World *w, BlockPos p)
 {
     if (!world_in_bounds(w, p)) return block_default(BLOCK_AIR);
-    uint32_t hash = (uint32_t)p.x*0x9e3779b1u ^ (uint32_t)p.y*0x85ebca6bu ^
-                    (uint32_t)p.z*0xc2b2ae35u;
-    /* A per-world value cache, invalidated before notification callbacks on
-     * every stored-state write. It never retains chunk/section pointers. */
-    WorldReadEntry *entry = &((World *)w)->reads[hash & (WORLD_READ_CACHE_SIZE - 1)];
-    if (entry->stamp == w->read_stamp && pos_equal(entry->pos, p)) return entry->state;
-    Chunk *c = world_find_chunk(w, chunk_key(p));
+    /* Writes invalidate their own slot; chunk insertion and plot edits
+     * invalidate the whole cache. No chunk/section pointers are retained. */
+    WorldReadEntry *entry = &((World *)w)->reads[read_slot(p)];
+    if (entry->stamp == w->read_cache_stamp && pos_equal(entry->pos, p))
+        return entry->state;
+    BlockPos key = chunk_key(p);
+    World *mutable = (World *)w;
+    Chunk *c;
+    if (w->recent_chunk_stamp == w->read_cache_stamp &&
+        pos_equal(w->recent_chunk_key, key)) {
+        c = w->recent_chunk;
+    } else {
+        c = world_find_chunk(w, key);
+        mutable->recent_chunk_key = key;
+        mutable->recent_chunk = c;
+        mutable->recent_chunk_stamp = w->read_cache_stamp;
+    }
     if (!c) {
         BlockState state = world_generated_state(w, p);
-        *entry = (WorldReadEntry){p, state, w->read_stamp};
+        *entry = (WorldReadEntry){p, state, w->read_cache_stamp};
         return state;
     }
     /* Restoring storage is logically const: blocks and simulation time do not change. */
@@ -509,7 +536,7 @@ BlockState world_get(const World *w, BlockPos p)
     StateId id = section_get(c->sections[(p.y - WORLD_MIN_Y) / 16], section_index(p));
     BlockState state;
     if (!state_decode(id, &state)) { w->sim->error = RS_INTERNAL_ERROR; return block_default(BLOCK_AIR); }
-    *entry = (WorldReadEntry){p, state, w->read_stamp};
+    *entry = (WorldReadEntry){p, state, w->read_cache_stamp};
     return state;
 }
 bool world_get_piston_motion(const World *w, BlockPos p,
@@ -553,8 +580,13 @@ static bool world_write_state(World *w, BlockPos p, BlockState state,
         section_destroy(c->sections[section]); c->sections[section] = NULL; ++w->topology_revision;
     }
     c->modified = true; c->archive_size = 0; ++w->revision;
-    invalidate_reads(w, previous.id == BLOCK_REDSTONE_WIRE &&
-                        state.id == BLOCK_REDSTONE_WIRE);
+    invalidate_wire_powers(w, previous.id == BLOCK_REDSTONE_WIRE &&
+                              state.id == BLOCK_REDSTONE_WIRE);
+    /* Read back the canonical decoded state after a write. Other positions
+     * remain cached, including a different position sharing this slot. */
+    WorldReadEntry *entry = &w->reads[read_slot(p)];
+    if (entry->stamp == w->read_cache_stamp && pos_equal(entry->pos, p))
+        entry->stamp = 0;
     sim_executor_stored(w, p, previous, state);
     if (w->observer) {
         bool observing = w->sim->observing;

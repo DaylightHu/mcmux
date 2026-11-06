@@ -38,6 +38,9 @@ struct SimExecutorOps {
                     BlockState previous, BlockState current);
     RsResult (*evaluate)(SimExecutorHost *host, void *context, BlockPos pos,
                           BlockState expected, RedstoneEvaluation *output);
+    /* Optional known callback targets, with one bit per Direction. */
+    bool (*neighbor_mask)(SimExecutorHost *host, void *context, BlockPos center,
+                           uint8_t *mask);
 };
 
 void sim_executor_init_reference(World *world);
@@ -46,6 +49,18 @@ RsResult sim_executor_flush(World *world);
 RsResult sim_executor_scheduled_tick(World *world, ScheduledEvent event);
 void sim_executor_state_changed(World *world, StateChange change);
 void sim_executor_edit_state_changed(World *world, StateChange change);
+
+/* A mask can skip only positions without neighbor_changed callbacks. Callers
+ * keep the original order and refresh it after any stored-state write, since
+ * a callback or user observer may edit a later neighbor in the same walk. */
+bool sim_executor_neighbor_mask_active(const World *world, BlockPos center,
+                                       uint8_t *mask);
+static inline bool sim_executor_neighbor_mask(const World *world, BlockPos center,
+                                               uint8_t *mask)
+{
+    return world->sim->executor.ops->neighbor_mask &&
+           sim_executor_neighbor_mask_active(world, center, mask);
+}
 
 void sim_executor_stored_active(World *world, BlockPos pos,
                                 BlockState previous, BlockState current);

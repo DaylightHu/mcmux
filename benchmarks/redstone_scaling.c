@@ -23,6 +23,17 @@ static const char *backend_name = "CPU queries";
 #endif
 
 typedef enum {
+    CSA_WHOLE, CSA_INDEPENDENT, CSA_SHARED
+} CsaLayout;
+static CsaLayout csa_layout;
+
+static const char *layout_name(CsaLayout layout)
+{
+    return layout == CSA_SHARED ? "shared" :
+           layout == CSA_INDEPENDENT ? "independent" : "whole";
+}
+
+typedef enum {
     CELL_REPEATER,
     CELL_CSA
 } CellKind;
@@ -46,6 +57,8 @@ typedef struct {
     BlockPos *inputs, *outputs;
     size_t input_count, output_count;
     BlockPos min, max;
+    BlockPos cell_size;
+    uint32_t cell_count, columns;
 } Fixture;
 
 typedef struct {
@@ -89,6 +102,7 @@ typedef struct {
     bool quick;
     bool verbose;
     bool write_report;
+    CsaLayout csa_layout;
 } Options;
 
 typedef struct {
@@ -182,6 +196,7 @@ static void usage(const char *program)
     printf("  --list-scenarios     List maintained scenario names\n");
     printf("  --quick              Short smoke-test version of the selected suite\n");
     printf("  --rounds N           Override timed pairs for every selected scenario\n");
+    printf("  --csa-layout MODE    whole (default), independent or shared topology\n");
     printf("  --seed N             Override the deterministic input seed\n");
     printf("  --no-verify          Skip the untimed per-tick equivalence pass\n");
     printf("  --verbose            Include every timed pair in the report\n");
@@ -293,6 +308,12 @@ static bool parse_options(int argc, char **argv, Options *options)
             exit(0);
         } else if (strcmp(argv[i], "--quick") == 0) {
             options->quick = true;
+        } else if (strcmp(argv[i], "--csa-layout") == 0) {
+            if (!option_value(argc, argv, &i, &value)) return false;
+            if (!strcmp(value, "whole")) options->csa_layout = CSA_WHOLE;
+            else if (!strcmp(value, "independent")) options->csa_layout = CSA_INDEPENDENT;
+            else if (!strcmp(value, "shared")) options->csa_layout = CSA_SHARED;
+            else { fprintf(stderr, "unknown CSA layout: %s\n", value); return false; }
         } else if (strcmp(argv[i], "--verbose") == 0) {
             options->verbose = true;
         } else if (strcmp(argv[i], "--no-verify") == 0) {
@@ -584,6 +605,9 @@ static bool build_csa_fixture(const Config *config, Fixture *fixture)
     structure_destroy(structure);
     if (!result_ok(sim_set_updates_enabled(world, true)) ||
         !world_ok(world, "build CSA fixture")) return false;
+    fixture->cell_size = (BlockPos){(int)info.width,(int)info.height,(int)info.length};
+    fixture->cell_count = config->width;
+    fixture->columns = columns;
     fixture->min = (BlockPos){base_x, base_y, base_z};
     fixture->max = (BlockPos){(int)max_x64, (int)max_y64, (int)max_z64};
     return true;
@@ -721,13 +745,35 @@ static void trace_write(void *context, BlockPos pos,
     ++trace->count;
 }
 
-static RsResult select_backend(Fixture *fixture)
+static RsResult select_region(World *world, BlockPos min, BlockPos max, bool append)
 {
 #ifdef MCMUX_BENCHMARK_C
-    return sim_use_c(fixture->world, fixture->min, fixture->max, selected_c_model);
+    return append ? sim_add_c(world, min, max, selected_c_model) :
+                    sim_use_c(world, min, max, selected_c_model);
 #else
-    return sim_use_cpu(fixture->world, fixture->min, fixture->max);
+    return append ? sim_add_cpu(world, min, max) : sim_use_cpu(world, min, max);
 #endif
+}
+
+static RsResult select_backend(Fixture *fixture)
+{
+    if (!fixture->cell_count || csa_layout == CSA_WHOLE)
+        return select_region(fixture->world, fixture->min, fixture->max, false);
+    for (uint32_t cell = 0; cell < fixture->cell_count; ++cell) {
+        BlockPos min = {
+            fixture->min.x + (int)(cell % fixture->columns) * (fixture->cell_size.x + 4),
+            fixture->min.y,
+            fixture->min.z + (int)(cell / fixture->columns) * (fixture->cell_size.z + 4)
+        };
+        BlockPos max = {min.x + fixture->cell_size.x - 1,
+                        min.y + fixture->cell_size.y - 1,
+                        min.z + fixture->cell_size.z - 1};
+        RsResult result = cell && csa_layout == CSA_SHARED ?
+            sim_add_cpu_instance(fixture->world, fixture->min, min) :
+            select_region(fixture->world, min, max, cell != 0);
+        if (result != RS_OK) return result;
+    }
+    return RS_OK;
 }
 
 static bool generated_queries_ran(const World *world)
@@ -1048,6 +1094,7 @@ static void write_report(Report *report, const BenchmarkResult *results,
     report_printf(report, "| Profile | `%s` |\n", profile);
     report_printf(report, "| Scenarios | %zu |\n", count);
     report_printf(report, "| CPU implementation | %s |\n", backend_name);
+    report_printf(report, "| CSA topology layout | `%s` |\n", layout_name(csa_layout));
 #ifdef MCMUX_BENCHMARK_C
     report_printf(report, "| AOT generation | %.6f s |\n", mcmux_c_generation_seconds);
     report_printf(report, "| AOT compile + link | %.6f s |\n", options->c_build_seconds);
@@ -1175,7 +1222,7 @@ static void write_report(Report *report, const BenchmarkResult *results,
         report_printf(report,
             "RESULT scenario=%s cell=%s width=%u depth=%u modules=%llu ticks=%u "
             "period=%u pattern=%s seed=%llu rounds=%u verify=%s platform=%s "
-            "reference_seconds=%.9f cpu_seconds=%.9f speedup=%.6f "
+            "cpu_layout=%s reference_seconds=%.9f cpu_seconds=%.9f speedup=%.6f "
             "reference_gt_per_second=%.3f cpu_gt_per_second=%.3f "
             "reference_module_gt_per_second=%.3f cpu_module_gt_per_second=%.3f "
             "cpu_prepare_seconds=%.9f cpu_evaluations=%llu cpu_cache_hits=%llu "
@@ -1188,6 +1235,7 @@ static void write_report(Report *report, const BenchmarkResult *results,
             config->ticks, config->period, pattern_name(config->pattern),
             (unsigned long long)config->seed, config->rounds,
             config->verify ? "yes" : "no", platform_name(),
+            config->cell == CELL_CSA ? layout_name(csa_layout) : "whole",
             results[i].reference_seconds, results[i].cpu_seconds,
             results[i].paired_speedup,
             config->ticks / results[i].reference_seconds,
@@ -1217,6 +1265,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    csa_layout = options.csa_layout;
     Scenario selected[sizeof(scenarios) / sizeof(scenarios[0])];
     size_t selected_count = 0;
     if (options.mode == RUN_SUITE) {
@@ -1248,7 +1297,10 @@ int main(int argc, char **argv)
         double start = runtime_clock_now();
         for (size_t i = 0; i < selected_count && ok; ++i) {
             Fixture fixture = {0};
-            ok = fixture_build(&selected[i].config, &fixture);
+            Config prototype = selected[i].config;
+            if (prototype.cell == CELL_CSA && csa_layout != CSA_WHOLE)
+                prototype.width = 1;
+            ok = fixture_build(&prototype, &fixture);
             if (ok) {
                 char symbol[64];
                 snprintf(symbol, sizeof(symbol), "mcmux_bench_%zu", i);

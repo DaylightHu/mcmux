@@ -23,6 +23,18 @@ typedef struct {
  * builds a new plan. Active piston motion is not supported at plan creation.
  * Selection is per world, is not saved, and never changes game-tick ordering. */
 RsResult sim_use_cpu(World *world, BlockPos min, BlockPos max);
+/* Attach an independent, non-overlapping CPU region to the current CPU
+ * executor; a reference world starts a new set. Failed calls leave it intact. */
+RsResult sim_add_cpu(World *world, BlockPos min, BlockPos max);
+/* Reuse an attached region's immutable topology and selected query backend at
+ * instance_min. prototype_min identifies that region's inclusive minimum.
+ * The new region has the same extent; its actual blocks and two-cell halo
+ * must have compatible topology. Dynamic values are loaded independently.
+ * No graph is rebuilt. Regions cannot overlap. On failure, existing regions,
+ * world blocks, time and pending events are unchanged. Generated C models
+ * retain their normal borrowed lifetime. Call between actions. */
+RsResult sim_add_cpu_instance(World *world, BlockPos prototype_min,
+                               BlockPos instance_min);
 RsResult sim_use_reference(World *world);
 /* True only while a CPU plan is valid. False for reference mode or an
  * invalidated plan. Read SimStats to distinguish computed/cached/fallback

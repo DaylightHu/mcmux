@@ -79,19 +79,18 @@ static void word(Topology *sink, uint32_t value)
 static void topology(const RedstonePlan *plan, Topology *sink)
 {
     word(sink, SIM_C_ABI_VERSION);
-    word(sink, (uint32_t)plan->bounds.min.x);
-    word(sink, (uint32_t)plan->bounds.min.y);
-    word(sink, (uint32_t)plan->bounds.min.z);
-    word(sink, (uint32_t)plan->bounds.max.x);
-    word(sink, (uint32_t)plan->bounds.max.y);
-    word(sink, (uint32_t)plan->bounds.max.z);
+    /* The model describes a shape, not its location in a world. Differences
+     * use unsigned arithmetic so negative coordinates and large spans work. */
+    word(sink, (uint32_t)plan->bounds.max.x - (uint32_t)plan->bounds.min.x);
+    word(sink, (uint32_t)plan->bounds.max.y - (uint32_t)plan->bounds.min.y);
+    word(sink, (uint32_t)plan->bounds.max.z - (uint32_t)plan->bounds.min.z);
     word(sink, (uint32_t)plan->node_count);
     word(sink, (uint32_t)plan->input_count);
     for (size_t i = 0; i < plan->node_count; ++i) {
         RedstonePlanNode node = plan->nodes[i];
-        word(sink, (uint32_t)node.pos.x);
-        word(sink, (uint32_t)node.pos.y);
-        word(sink, (uint32_t)node.pos.z);
+        word(sink, (uint32_t)node.pos.x - (uint32_t)plan->bounds.min.x);
+        word(sink, (uint32_t)node.pos.y - (uint32_t)plan->bounds.min.y);
+        word(sink, (uint32_t)node.pos.z - (uint32_t)plan->bounds.min.z);
         word(sink, topology_state(node.initial_state));
         word(sink, node.flags);
         word(sink, node.wire_output_faces);
@@ -389,8 +388,8 @@ RsResult redstone_c_write(const RedstonePlan *plan, FILE *out,
                           const char *symbol)
 {
     if (!plan || !out || !symbol_valid(symbol) || plan->input_count > UINT32_MAX ||
-        plan->node_count > (SIZE_MAX - 9)/8 ||
-        plan->input_count > (SIZE_MAX - 9 - plan->node_count*8)/4)
+        plan->node_count > (SIZE_MAX - 6)/8 ||
+        plan->input_count > (SIZE_MAX - 6 - plan->node_count*8)/4)
         return RS_INVALID_ARGUMENT;
     /* Validate all indices/ranges before touching the stream. */
     RedstoneState validation = {0};

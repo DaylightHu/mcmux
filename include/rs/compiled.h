@@ -11,7 +11,7 @@ typedef struct {
     bool target_on, locked;
 } SimCEvaluation;
 
-enum { SIM_C_ABI_VERSION = 1 };
+enum { SIM_C_ABI_VERSION = 2 };
 typedef RsResult (*SimCEvaluate)(const BlockState *blocks, uint32_t node,
                                 SimCEvaluation *output);
 typedef struct {
@@ -41,6 +41,12 @@ RsResult sim_write_c(const World *world, BlockPos min, BlockPos max,
  * topology changes invalidate it. Original tick/notification order is kept. */
 RsResult sim_use_c(World *world, BlockPos min, BlockPos max,
                    const SimCModel *model);
+/* Attach another independent instance of a compiled model. Regions cannot
+ * overlap. Its model may be the same pointer as another region's model;
+ * each attachment owns its own state and query cache. Existing attachments
+ * survive a failed call. sim_use_reference() detaches all regions. */
+RsResult sim_add_c(World *world, BlockPos min, BlockPos max,
+                  const SimCModel *model);
 bool sim_c_active(const World *world);
 
 #endif
