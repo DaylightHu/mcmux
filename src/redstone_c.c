@@ -114,7 +114,17 @@ bool redstone_c_matches(const RedstonePlan *plan, const SimCModel *model)
     Topology sink = {.expected = model->topology,
                      .limit = model->topology_word_count, .matches = true};
     topology(plan, &sink);
-    return sink.matches && sink.count == sink.limit;
+    if (!sink.matches || sink.count != sink.limit) return false;
+    if (!model->read_offsets)
+        return !model->read_count && !model->read_targets;
+    if (model->read_offsets[0] != 0 ||
+        model->read_offsets[model->node_count] != model->read_count ||
+        (model->read_count && !model->read_targets)) return false;
+    for (size_t i = 0; i < model->node_count; ++i)
+        if (model->read_offsets[i] > model->read_offsets[i + 1]) return false;
+    for (size_t i = 0; i < model->read_count; ++i)
+        if (model->read_targets[i] >= model->node_count) return false;
+    return true;
 }
 
 static bool symbol_valid(const char *symbol)
@@ -217,10 +227,44 @@ static bool node_supported(const RedstonePlan *plan, size_t id)
 }
 
 typedef struct {
+    RedstoneNodeId source, target;
+} CRead;
+
+typedef struct {
+    CRead *items;
+    size_t count, capacity;
+    RedstoneNodeId *seen;
+} CReads;
+
+typedef struct {
     char *data;
     size_t length, capacity;
     RsResult error;
+    CReads *reads;
+    RedstoneNodeId target;
 } CText;
+
+/* Record at the same sites that emit dynamic state loads. In particular,
+ * constant faces and conductor relays must not grow a different read graph
+ * from the generated query. Each source/target pair is retained only once. */
+static void state_read(CText *out, RedstoneNodeId source)
+{
+    CReads *reads = out->reads;
+    if (out->error != RS_OK || !reads || reads->seen[source] == out->target) return;
+    if (reads->count == reads->capacity) {
+        size_t capacity = reads->capacity ? reads->capacity * 2 : 64;
+        if (capacity < reads->capacity || capacity > SIZE_MAX / sizeof(*reads->items)) {
+            out->error = RS_OUT_OF_MEMORY;
+            return;
+        }
+        CRead *items = realloc(reads->items, capacity * sizeof(*items));
+        if (!items) { out->error = RS_OUT_OF_MEMORY; return; }
+        reads->items = items;
+        reads->capacity = capacity;
+    }
+    reads->seen[source] = out->target;
+    reads->items[reads->count++] = (CRead){source, out->target};
+}
 
 static void text_printf(CText *out, const char *format, ...)
 {
@@ -276,29 +320,47 @@ static unsigned emit_signal(CText *out, const RedstonePlan *plan,
         if (without_wire || face == DIR_UP ||
             (face != DIR_DOWN && !(node.wire_output_faces & (1u << face))))
             text_puts("0", out);
-        else text_printf(out, "blocks[%" PRId64 "].data.wire.power", offset);
+        else {
+            state_read(out, id);
+            text_printf(out, "blocks[%" PRId64 "].data.wire.power", offset);
+        }
         break;
     case BLOCK_REDSTONE_TORCH:
         if (face == block.data.torch.support_dir || (direct && face != DIR_UP))
             text_puts("0", out);
-        else text_printf(out, "blocks[%" PRId64 "].data.torch.lit ? 15 : 0", offset);
+        else {
+            state_read(out, id);
+            text_printf(out, "blocks[%" PRId64 "].data.torch.lit ? 15 : 0", offset);
+        }
         break;
     case BLOCK_REDSTONE_REPEATER:
         if (face != block.data.repeater.facing) text_puts("0", out);
-        else text_printf(out, "blocks[%" PRId64 "].data.repeater.powered ? 15 : 0", offset);
+        else {
+            state_read(out, id);
+            text_printf(out, "blocks[%" PRId64 "].data.repeater.powered ? 15 : 0", offset);
+        }
         break;
     case BLOCK_REDSTONE_COMPARATOR:
         if (face != block.data.comparator.facing) text_puts("0", out);
-        else text_printf(out, "blocks[%" PRId64 "].data.comparator.powered ? "
-                          "blocks[%" PRId64 "].data.comparator.output : 0", offset, offset);
+        else {
+            state_read(out, id);
+            text_printf(out, "blocks[%" PRId64 "].data.comparator.powered ? "
+                        "blocks[%" PRId64 "].data.comparator.output : 0", offset, offset);
+        }
         break;
     case BLOCK_OBSERVER:
         if (face != block.data.observer.facing) text_puts("0", out);
-        else text_printf(out, "blocks[%" PRId64 "].data.observer.powered ? 15 : 0", offset);
+        else {
+            state_read(out, id);
+            text_printf(out, "blocks[%" PRId64 "].data.observer.powered ? 15 : 0", offset);
+        }
         break;
     case BLOCK_LEVER:
         if (direct && face != block.data.lever.support_dir) text_puts("0", out);
-        else text_printf(out, "blocks[%" PRId64 "].data.lever.powered ? 15 : 0", offset);
+        else {
+            state_read(out, id);
+            text_printf(out, "blocks[%" PRId64 "].data.lever.powered ? 15 : 0", offset);
+        }
         break;
     default:
         text_puts("0", out);
@@ -324,14 +386,17 @@ static void emit_body(CText *out, const RedstonePlan *plan, size_t id)
     BlockId target = (BlockId)node.initial_state.id;
     text_puts("    (void)blocks;\n    SimCEvaluation r = {0};\n", out);
     unsigned next = 0;
+    bool has_side = false;
     for (size_t i = 0; i < node.input_count; ++i) {
         RedstonePlanInput input = plan->inputs[node.first_input + i];
         BlockId source = (BlockId)plan->nodes[input.source].initial_state.id;
         unsigned value;
+        if (input.kind == REDSTONE_INPUT_SIDE) has_side = true;
         if (source == BLOCK_REDSTONE_WIRE &&
             (target == BLOCK_REDSTONE_REPEATER ||
              target == BLOCK_REDSTONE_COMPARATOR || input.source_face == DIR_COUNT)) {
             value = next++;
+            state_read(out, input.source);
             text_printf(out, "    uint8_t v%u = blocks[%" PRId64 "].data.wire.power;\n",
                     value, (int64_t)input.source - (int64_t)id);
         } else if (input.kind == REDSTONE_INPUT_SIDE &&
@@ -355,10 +420,14 @@ static void emit_body(CText *out, const RedstonePlan *plan, size_t id)
         text_puts("    r.target_on = !r.target_on;\n"
               "    r.target_power = r.target_on ? 15 : 0;\n", out);
     } else if (target == BLOCK_REDSTONE_REPEATER) {
-        text_puts("    r.locked = r.side > 0;\n"
-            "    if (r.locked) r.target_on = blocks[0].data.repeater.powered;\n"
-            "    r.target_power = r.target_on ? 15 : 0;\n", out);
+        if (has_side) {
+            state_read(out, (RedstoneNodeId)id);
+            text_puts("    r.locked = r.side > 0;\n"
+                "    if (r.locked) r.target_on = blocks[0].data.repeater.powered;\n", out);
+        }
+        text_puts("    r.target_power = r.target_on ? 15 : 0;\n", out);
     } else if (target == BLOCK_REDSTONE_COMPARATOR) {
+        state_read(out, (RedstoneNodeId)id);
         text_puts("    r.target_on = r.input > 0 && (r.input > r.side ||\n"
             "        (r.input == r.side && !blocks[0].data.comparator.subtract));\n"
             "    if (blocks[0].data.comparator.subtract)\n"
@@ -398,6 +467,9 @@ RsResult redstone_c_write(const RedstonePlan *plan, FILE *out,
     if (result != RS_OK) return result;
     Query *queries = NULL;
     uint32_t *mapping = NULL, *buckets = NULL;
+    CReads reads = {0};
+    size_t *read_offsets = NULL;
+    RedstoneNodeId *read_targets = NULL;
     size_t query_count = 0, bucket_count = 1;
     if (plan->node_count > SIZE_MAX/sizeof(*queries)) return RS_OUT_OF_MEMORY;
     if (plan->node_count) {
@@ -409,15 +481,19 @@ RsResult redstone_c_write(const RedstonePlan *plan, FILE *out,
         queries = calloc(plan->node_count, sizeof(*queries));
         mapping = malloc(plan->node_count*sizeof(*mapping));
         buckets = malloc(bucket_count*sizeof(*buckets));
-        if (!queries || !mapping || !buckets) { result = RS_OUT_OF_MEMORY; goto cleanup; }
+        reads.seen = malloc(plan->node_count * sizeof(*reads.seen));
+        if (!queries || !mapping || !buckets || !reads.seen) {
+            result = RS_OUT_OF_MEMORY; goto cleanup;
+        }
         for (size_t i = 0; i < bucket_count; ++i) buckets[i] = UINT32_MAX;
+        for (size_t i = 0; i < plan->node_count; ++i) reads.seen[i] = UINT32_MAX;
     }
     /* Share identical code, never state. Each body uses constant offsets from
      * its target block. Full text comparison makes hash collisions harmless. */
     for (size_t i = 0; i < plan->node_count; ++i) {
         mapping[i] = UINT32_MAX;
         if (!node_supported(plan, i)) continue;
-        CText body = {0};
+        CText body = {.reads = &reads, .target = (RedstoneNodeId)i};
         emit_body(&body, plan, i);
         if (body.error != RS_OK) {
             result = body.error;
@@ -440,6 +516,21 @@ RsResult redstone_c_write(const RedstonePlan *plan, FILE *out,
             buckets[bucket] = match;
         }
         mapping[i] = match;
+    }
+    read_offsets = calloc(plan->node_count + 1, sizeof(*read_offsets));
+    if (reads.count) read_targets = malloc(reads.count * sizeof(*read_targets));
+    if (!read_offsets || (reads.count && !read_targets)) {
+        result = RS_OUT_OF_MEMORY; goto cleanup;
+    }
+    for (size_t i = 0; i < reads.count; ++i)
+        ++read_offsets[reads.items[i].source + 1];
+    for (size_t i = 0; i < plan->node_count; ++i) {
+        read_offsets[i + 1] += read_offsets[i];
+        reads.seen[i] = 0;
+    }
+    for (size_t i = 0; i < reads.count; ++i) {
+        CRead read = reads.items[i];
+        read_targets[read_offsets[read.source] + reads.seen[read.source]++] = read.target;
     }
     fprintf(out, "/* Generated by mcmux. Re-export after changing the core or topology.\n"
         " * Pure queries only: time, writes and notifications use the core runtime.\n"
@@ -472,12 +563,33 @@ RsResult redstone_c_write(const RedstonePlan *plan, FILE *out,
     } else {
         fputs("    (void)blocks; (void)node; (void)output;\n    return RS_INVALID_ARGUMENT;\n", out);
     }
-    fprintf(out, "}\n\nconst SimCModel %s = {\n"
-        "    SIM_C_ABI_VERSION, %zu, %zu, %s_topology, %s_evaluate\n};\n",
-        symbol, plan->node_count, sink.count, symbol, symbol);
+    fprintf(out, "}\n\nstatic const size_t %s_read_offsets[] = {", symbol);
+    for (size_t i = 0; i <= plan->node_count; ++i) {
+        if (i % 8 == 0) fputs("\n    ", out);
+        fprintf(out, "%zu,", read_offsets[i]);
+    }
+    fputs("\n};\n", out);
+    if (reads.count) {
+        fprintf(out, "\nstatic const uint32_t %s_read_targets[] = {", symbol);
+        for (size_t i = 0; i < reads.count; ++i) {
+            if (i % 8 == 0) fputs("\n    ", out);
+            fprintf(out, "UINT32_C(%" PRIu32 "),", read_targets[i]);
+        }
+        fputs("\n};\n", out);
+    }
+    fprintf(out, "\nconst SimCModel %s = {\n"
+        "    .abi_version = SIM_C_ABI_VERSION, .node_count = %zu,\n"
+        "    .topology_word_count = %zu, .topology = %s_topology,\n"
+        "    .evaluate = %s_evaluate, .read_count = %zu,\n"
+        "    .read_offsets = %s_read_offsets, .read_targets = ",
+        symbol, plan->node_count, sink.count, symbol, symbol, reads.count, symbol);
+    if (reads.count) fprintf(out, "%s_read_targets", symbol);
+    else fputs("NULL", out);
+    fputs("\n};\n", out);
     result = ferror(out) ? RS_IO_ERROR : RS_OK;
 cleanup:
     for (size_t i = 0; i < query_count; ++i) free(queries[i].body.data);
     free(queries); free(mapping); free(buckets);
+    free(reads.items); free(reads.seen); free(read_offsets); free(read_targets);
     return result;
 }
