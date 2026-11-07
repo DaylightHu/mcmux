@@ -966,9 +966,8 @@ static bool build_headless_tool(const char *source, const char *name, bool run)
     return build_headless_tool_flags(source, name, run, NULL);
 }
 
-static bool prepare_module_baseline(void)
+static bool prepare_module_baseline(const char *requested)
 {
-    static const char revision[] = "65076784b80c6819d191deb18730564bfa7091f3";
     static const char *const symbols[] = {
         "sim_executor_init_reference", "sim_executor_destroy", "sim_executor_flush",
         "sim_executor_scheduled_tick", "sim_executor_state_changed",
@@ -979,6 +978,29 @@ static bool prepare_module_baseline(void)
         "sim_cpu_active", "sim_c_active"
     };
     Nob_Cmd command = {0};
+    nob_cmd_append(&command, "git", "rev-parse", "--verify", "--end-of-options",
+                   nob_temp_sprintf("%s^{commit}", requested));
+    if (!nob_cmd_run(&command, .stdout_path = "build/module-baseline-revision.txt")) {
+        nob_log(NOB_ERROR, "baseline commit unavailable in local Git history: %s", requested);
+        return false;
+    }
+    Nob_String_Builder resolved = {0};
+    if (!nob_read_entire_file("build/module-baseline-revision.txt", &resolved)) {
+        free(resolved.items);
+        return false;
+    }
+    while (resolved.count && isspace((unsigned char)resolved.items[resolved.count - 1]))
+        --resolved.count;
+    bool valid = resolved.count == 40 || resolved.count == 64;
+    for (size_t i = 0; i < resolved.count; ++i)
+        if (!isxdigit((unsigned char)resolved.items[i])) valid = false;
+    if (!valid) {
+        nob_log(NOB_ERROR, "Git returned an invalid baseline commit ID");
+        free(resolved.items);
+        return false;
+    }
+    const char *revision = nob_temp_sprintf("%.*s", (int)resolved.count, resolved.items);
+    free(resolved.items);
     nob_cmd_append(&command, "git", "show",
         nob_temp_sprintf("%s:src/sim_executor.c", revision));
     if (!nob_cmd_run(&command, .stdout_path = "build/module-baseline-source.c")) {
@@ -989,6 +1011,10 @@ static bool prepare_module_baseline(void)
     bool ok = nob_read_entire_file("build/module-baseline-source.c", &baseline) &&
               nob_read_entire_file("src/sim_executor.c", &current);
     if (ok) {
+        if (baseline.count == current.count &&
+            !memcmp(baseline.items, current.items, current.count))
+            nob_log(NOB_INFO, "baseline and current executor sources are identical; "
+                             "this comparison measures run variation, not a code change");
         for (size_t i = 0; i < NOB_ARRAY_LEN(symbols); ++i)
             nob_sb_append_cstr(&wrapper, nob_temp_sprintf("#define %s baseline_%s\n",
                                                        symbols[i], symbols[i]));
@@ -1016,13 +1042,25 @@ static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
 {
     bool info_only = false;
     bool compare_modules = false;
+    const char *baseline = NULL;
     if (benchmark) {
         int count = 0;
         for (int i = 0; i < argc; ++i) {
             if (!strcmp(argv[i], "--compare-modules")) compare_modules = true;
+            else if (!strcmp(argv[i], "--baseline")) {
+                if (i + 1 == argc || !argv[i + 1][0]) {
+                    nob_log(NOB_ERROR, "--baseline requires a Git commit or ref");
+                    return false;
+                }
+                baseline = argv[++i];
+            }
             else argv[count++] = argv[i];
         }
         argc = count;
+    }
+    if (baseline && !compare_modules) {
+        nob_log(NOB_ERROR, "--baseline requires --compare-modules");
+        return false;
     }
     if (benchmark) {
         for (int i = 0; i < argc; ++i) {
@@ -1050,7 +1088,7 @@ static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
     if (info_only) return nob_cmd_run(&command);
     nob_cmd_append(&command, "--emit-c", header);
     if (!nob_cmd_run(&command)) return false;
-    if (compare_modules && !prepare_module_baseline()) return false;
+    if (compare_modules && !prepare_module_baseline(baseline ? baseline : "HEAD")) return false;
     uint64_t start = nob_nanos_since_unspecified_epoch();
     if (!build_headless_tool_flags(source, binary, false, define)) return false;
     double seconds = (double)(nob_nanos_since_unspecified_epoch() - start)/1e9;
@@ -1075,6 +1113,7 @@ static void print_help(const char *program)
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
     printf("  benchmark    Generate C queries, compile and run the full redstone suite\n");
     printf("               --compare-modules: one-command baseline/current module comparison\n");
+    printf("               --baseline REF: comparison baseline (default: HEAD)\n");
     printf("  test-c       Generate, compile and test the C query backend\n");
     printf("  export-c     Export INPUT.mcs OUTPUT.c [SYMBOL] as C query code\n");
     printf("  lib          Build build/libmcmux.a (no GUI dependencies)\n");
