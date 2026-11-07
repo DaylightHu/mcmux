@@ -325,6 +325,13 @@ static bool cpu_valid(const World *world, const CpuExecutor *cpu)
 
 static RsResult cpu_invalidate(CpuExecutor *cpu, RedstoneNodeId source)
 {
+    if (cpu->model && cpu->model->read_offsets) {
+        const SimCModel *model = cpu->model;
+        for (size_t i = model->read_offsets[source];
+             i < model->read_offsets[source + 1]; ++i)
+            cpu->cache[model->read_targets[i]].cached = CPU_CACHE_EMPTY;
+        return RS_OK;
+    }
     if (++cpu->generation == 0) {
         for (size_t i = 0; i < cpu->topology->plan.node_count; ++i)
             cpu->cache[i].visited = 0;
