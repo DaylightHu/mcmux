@@ -13,12 +13,14 @@
 #include "tick_command.h"
 #include "voxel_pick.h"
 #include "world_renderer.h"
+#include "world_msaa.h"
 #include "workspace_layout.h"
 #include "workspace_editor.h"
 #include "workspace_output.h"
 #include "workspace_code.h"
 #include "world_session_manager.h"
 #include "raylib.h"
+#include "rlgl.h"
 #include "rs/session.h"
 
 #include <ctype.h>
@@ -106,6 +108,8 @@ typedef struct {
     /* Borrowed from the host; frontends may select sessions but do not own them. */
     WorldSessionManager *world_sessions;
     RenderTexture2D gui_target;
+    WorldMsaa world_msaa;
+    bool world_msaa_enabled;
     Texture2D title_background;
     bool pane_prefix, pane_help;
     bool window_gui_visible, window_text_visible, window_resize_pending;
@@ -373,6 +377,7 @@ static void close_world(GuiApp *app)
     release_mouse(app);
     app->pane_prefix = app->pane_help = false;
     gui_view_reset();
+    world_msaa_destroy(&app->world_msaa);
     world_renderer_destroy(app->world_renderer);
     app->world_renderer = NULL;
     app->session = NULL;
@@ -1528,6 +1533,8 @@ static void draw_selection(GuiApp *app)
 
 static void draw_world(GuiApp *app, VoxelHit hit)
 {
+    /* BeginTextureMode already set the viewport and matrices to this size. */
+    if (app->world_msaa.id) rlEnableFramebuffer(app->world_msaa.id);
     ClearBackground((Color){184, 211, 214, 255});
     BeginMode3D(app->camera);
         world_renderer_draw(app->world_renderer);
@@ -1540,6 +1547,8 @@ static void draw_world(GuiApp *app, VoxelHit hit)
         if (app->workspace.focus == 0) draw_flexible_placement(app, hit);
         draw_selection(app);
     EndMode3D();
+    if (app->world_msaa.id)
+        world_msaa_resolve(&app->world_msaa, app->gui_target.id);
 
     if (app->screen == GUI_WORLD && app->workspace.focus == 0) {
         int cx = gui_view_width()/2;
@@ -1702,6 +1711,7 @@ static void draw_pause(GuiApp *app)
     Rectangle save = {(float)center - 140, 265, 280, 44};
     Rectangle title = {(float)center - 140, 325, 280, 44};
     Rectangle exit = {(float)center - 140, 385, 280, 44};
+    Rectangle antialias = {(float)center - 140, 445, 280, 44};
 
     if (button(resume, "Continue", active)) {
         app->screen = GUI_WORLD;
@@ -1733,6 +1743,12 @@ static void draw_pause(GuiApp *app)
     if (button(exit, "Save and close GUI", active)) {
         request_save_action(app, AFTER_SAVE_GUI_DETACH);
         return;
+    }
+    const char *msaa_label = !app->world_msaa_enabled ? "MSAA: Off" :
+                            app->world_msaa.id ? "MSAA: 4x" : "MSAA: Unavailable";
+    if (button(antialias, msaa_label, active)) {
+        app->world_msaa_enabled = !app->world_msaa_enabled;
+        if (!app->world_msaa_enabled) world_msaa_destroy(&app->world_msaa);
     }
 }
 
@@ -1801,6 +1817,7 @@ static bool initialize(GuiApp *app, WorldSessionManager *world_sessions)
     app->running = true;
     app->selected_save = -1;
     app->screen = GUI_TITLE;
+    app->world_msaa_enabled = true;
     snprintf(app->message, sizeof(app->message),
              "Create a world or load an existing .mcw file");
 
@@ -2019,7 +2036,10 @@ static bool prepare_program_run(void *context, WorkspaceEditor *editor)
 static bool prepare_gui_view(GuiApp *app)
 {
     gui_view_reset();
-    if (!app->workspace.gui_visible) return true;
+    if (!app->workspace.gui_visible) {
+        world_msaa_destroy(&app->world_msaa);
+        return true;
+    }
     WorkspaceGeometry geometry;
     workspace_geometry(app, &geometry);
     Rectangle box = pane_rectangle(geometry.gui);
@@ -2042,6 +2062,10 @@ static bool prepare_gui_view(GuiApp *app)
         if (app->gui_target.id) UnloadRenderTexture(app->gui_target);
         app->gui_target = target;
     }
+    if (app->world_msaa_enabled && app->session &&
+        app->screen != GUI_TITLE && app->screen != GUI_SAVE_ERROR)
+        world_msaa_prepare(&app->world_msaa, width, height);
+    else world_msaa_destroy(&app->world_msaa);
     gui_view_set(box, width, height);
     return true;
 }
