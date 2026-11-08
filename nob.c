@@ -975,6 +975,7 @@ static bool prepare_module_baseline(const char *requested)
         "sim_executor_scheduled_tick", "sim_executor_state_changed",
         "sim_executor_edit_state_changed", "sim_executor_stored_active",
         "sim_executor_evaluate_active", "sim_executor_neighbor_mask_active",
+        "sim_executor_shape_mask_active",
         "sim_use_cpu", "sim_add_cpu", "sim_use_c", "sim_add_c",
         "sim_add_cpu_instance", "sim_write_c", "sim_use_reference",
         "sim_cpu_active", "sim_c_active"

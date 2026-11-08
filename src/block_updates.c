@@ -192,6 +192,24 @@ static void placed(World *w, StateChange c, bool changed_type)
     }
 }
 
+/* Direction and support properties here are part of the compiled region's
+ * shape. Keep this predicate in step with update_shape below. */
+bool sim_shape_update_needed(BlockState state, Direction toward)
+{
+    if (block_definition((BlockId)state.id)->observed_changed) return true;
+    switch ((BlockId)state.id) {
+    case BLOCK_REDSTONE_WIRE: return toward != DIR_DOWN;
+    case BLOCK_REDSTONE_REPEATER: return toward/2 != state.data.repeater.facing/2;
+    case BLOCK_NOTE_BLOCK: return toward == DIR_DOWN;
+    case BLOCK_REDSTONE_TORCH: return toward == (Direction)state.data.torch.support_dir;
+    case BLOCK_LEVER: return toward == (Direction)state.data.lever.support_dir;
+    case BLOCK_PISTON_HEAD:
+    case BLOCK_STICKY_PISTON_HEAD:
+        return toward == direction_opposite((Direction)state.data.piston.facing);
+    default: return false;
+    }
+}
+
 static BlockState update_shape(World *w, BlockPos pos, BlockState state,
                                 Direction toward, BlockPos source)
 {
@@ -252,9 +270,19 @@ void sim_update_shape_at(World *w, BlockPos pos, Direction toward,
 
 void sim_update_neighbor_shapes(World *w, BlockPos pos, unsigned flags, unsigned limit)
 {
-    for (unsigned i = 0; i < DIR_COUNT; ++i)
+    uint8_t mask;
+    bool known = sim_executor_shape_mask(w, pos, &mask);
+    uint64_t revision = w->revision, topology = w->topology_revision;
+    for (unsigned i = 0; i < DIR_COUNT; ++i) {
+        if (known && (revision != w->revision || topology != w->topology_revision)) {
+            known = sim_executor_shape_mask(w, pos, &mask);
+            revision = w->revision;
+            topology = w->topology_revision;
+        }
+        if (known && !(mask & (1u << shapes[i]))) continue;
         sim_update_shape_at(w, block_offset(pos, shapes[i]),
             direction_opposite(shapes[i]), pos, flags, limit);
+    }
 }
 
 static void notify_state_change(World *w, StateChange c)

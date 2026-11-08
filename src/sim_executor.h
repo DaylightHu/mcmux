@@ -41,6 +41,8 @@ struct SimExecutorOps {
     /* Optional known callback targets, with one bit per Direction. */
     bool (*neighbor_mask)(SimExecutorHost *host, void *context, BlockPos center,
                            uint8_t *mask);
+    bool (*shape_mask)(SimExecutorHost *host, void *context, BlockPos center,
+                       uint8_t *mask);
 };
 
 void sim_executor_init_reference(World *world);
@@ -60,6 +62,14 @@ static inline bool sim_executor_neighbor_mask(const World *world, BlockPos cente
 {
     return world->sim->executor.ops->neighbor_mask &&
            sim_executor_neighbor_mask_active(world, center, mask);
+}
+
+bool sim_executor_shape_mask_active(const World *world, BlockPos center, uint8_t *mask);
+static inline bool sim_executor_shape_mask(const World *world, BlockPos center,
+                                           uint8_t *mask)
+{
+    return world->sim->executor.ops->shape_mask &&
+           sim_executor_shape_mask_active(world, center, mask);
 }
 
 void sim_executor_stored_active(World *world, BlockPos pos,
