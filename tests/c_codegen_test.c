@@ -173,6 +173,59 @@ static bool evaluation_equal(SimCEvaluation a, SimCEvaluation b)
            a.target_on == b.target_on && a.locked == b.locked;
 }
 
+static BlockState vary_state(BlockState block)
+{
+    switch ((BlockId)block.id) {
+    case BLOCK_REDSTONE_WIRE: block.data.wire.power = 15 - block.data.wire.power; break;
+    case BLOCK_REDSTONE_TORCH: block.data.torch.lit = !block.data.torch.lit; break;
+    case BLOCK_REDSTONE_REPEATER:
+        block.data.repeater.powered = !block.data.repeater.powered;
+        block.data.repeater.locked = !block.data.repeater.locked;
+        block.data.repeater.delay = 1 + block.data.repeater.delay % 4;
+        break;
+    case BLOCK_REDSTONE_COMPARATOR:
+        block.data.comparator.output = 15 - block.data.comparator.output;
+        block.data.comparator.powered = !block.data.comparator.powered;
+        block.data.comparator.subtract = !block.data.comparator.subtract;
+        break;
+    case BLOCK_OBSERVER: block.data.observer.powered = !block.data.observer.powered; break;
+    case BLOCK_LEVER: block.data.lever.powered = !block.data.lever.powered; break;
+    default: break;
+    }
+    return block;
+}
+
+/* Perturb each state independently. Every changed query result must have a
+ * reverse dependency, even when that load is conditional on another state.
+ * Reference results, not the emitter's read walker, decide what changed. */
+static void dependency_tests(RedstoneState *state)
+{
+    size_t count = state->node_count;
+    SimCEvaluation *before = calloc(count, sizeof(*before));
+    RsResult *results = malloc(count * sizeof(*results));
+    REQUIRE(before && results && test_rules.read_offsets);
+    for (size_t target = 0; target < count; ++target)
+        results[target] = redstone_evaluate(state, (RedstoneNodeId)target, &before[target]);
+    for (size_t source = 0; source < count; ++source) {
+        BlockState old = state->blocks[source], changed = vary_state(old);
+        RsResult set = redstone_state_set(state, (RedstoneNodeId)source, changed);
+        REQUIRE(set == RS_OK || set == RS_UNCHANGED);
+        if (set == RS_UNCHANGED) continue;
+        size_t begin = test_rules.read_offsets[source], end = test_rules.read_offsets[source + 1];
+        size_t cursor = begin;
+        for (size_t target = 0; target < count; ++target) {
+            SimCEvaluation after = {0};
+            RsResult result = redstone_evaluate(state, (RedstoneNodeId)target, &after);
+            REQUIRE(result == results[target]);
+            while (cursor < end && test_rules.read_targets[cursor] < target) ++cursor;
+            if (result == RS_OK && !evaluation_equal(before[target], after))
+                REQUIRE(cursor < end && test_rules.read_targets[cursor] == target);
+        }
+        REQUIRE(redstone_state_set(state, (RedstoneNodeId)source, old) == RS_OK);
+    }
+    free(before); free(results);
+}
+
 static void query_tests(void)
 {
     RedstonePlan plan = rules();
@@ -213,6 +266,7 @@ static void query_tests(void)
             if (a == RS_OK) ++supported;
             else { REQUIRE(a == RS_UNSUPPORTED); ++unsupported; }
         }
+        if (round % 32 == 0) dependency_tests(&state);
     }
     REQUIRE(supported && unsupported);
     REQUIRE(test_rules.evaluate(state.blocks, UINT32_MAX, NULL) == RS_INVALID_ARGUMENT);
@@ -656,6 +710,25 @@ static void attachment_tests(void)
     REQUIRE(sim_use_c(world, MIN, MAX, &bad) == RS_UNSUPPORTED);
     REQUIRE(sim_c_active(world));
     free(words);
+    size_t *offsets = malloc((test_live.node_count + 1) * sizeof(*offsets));
+    REQUIRE(offsets);
+    memcpy(offsets, test_live.read_offsets, (test_live.node_count + 1) * sizeof(*offsets));
+    bad = test_live; bad.read_offsets = offsets;
+    offsets[0] = 1;
+    REQUIRE(sim_use_c(world, MIN, MAX, &bad) == RS_UNSUPPORTED);
+    offsets[0] = 0;
+    offsets[1] = test_live.read_count + 1;
+    REQUIRE(sim_use_c(world, MIN, MAX, &bad) == RS_UNSUPPORTED);
+    free(offsets);
+    bad = test_live; bad.read_targets = NULL;
+    REQUIRE(sim_use_c(world, MIN, MAX, &bad) == RS_UNSUPPORTED);
+    uint32_t *targets = malloc(test_live.read_count * sizeof(*targets));
+    REQUIRE(targets);
+    memcpy(targets, test_live.read_targets, test_live.read_count * sizeof(*targets));
+    targets[0] = (uint32_t)test_live.node_count;
+    bad = test_live; bad.read_targets = targets;
+    REQUIRE(sim_use_c(world, MIN, MAX, &bad) == RS_UNSUPPORTED);
+    free(targets);
     bad = test_live; bad.abi_version++;
     REQUIRE(sim_use_c(world, MIN, MAX, &bad) == RS_INVALID_ARGUMENT);
     REQUIRE(sim_use_c(world, MIN, MAX, NULL) == RS_INVALID_ARGUMENT);
@@ -682,6 +755,106 @@ static void attachment_tests(void)
     REQUIRE(world_result(empty) == RS_OK);
     world_destroy(empty);
 }
+
+static void cache_dependency_tests(void)
+{
+    World *world = fixture();
+    REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
+    REQUIRE(sim_use_c(world, MIN, MAX, &test_live) == RS_OK);
+    RedstonePlan plan = {0};
+    RedstoneState state = {0};
+    REQUIRE(redstone_plan_build(world, (RedstonePlanBounds){MIN,MAX}, &plan) == RS_OK);
+    REQUIRE(redstone_state_build(&plan, &state) == RS_OK);
+    for (size_t source = 0; source <= plan.node_count; ++source) {
+        /* Prime every cache before each write, including relayed reads. */
+        for (size_t target = 0; target < plan.node_count; ++target) {
+            SimCEvaluation expected = {0}, actual = {0};
+            RsResult result = redstone_evaluate(&state, (RedstoneNodeId)target, &expected);
+            REQUIRE(sim_executor_evaluate(world, plan.nodes[target].pos,
+                state.blocks[target], &actual) == result);
+            if (result == RS_OK) REQUIRE(evaluation_equal(expected, actual));
+        }
+        if (source == plan.node_count) break;
+        BlockState block = vary_state(state.blocks[source]);
+        REQUIRE(world_set_block(world, plan.nodes[source].pos, block,
+                                UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE));
+        RsResult set = redstone_state_set(&state, (RedstoneNodeId)source, block);
+        REQUIRE(set == RS_OK || set == RS_UNCHANGED);
+    }
+    redstone_state_destroy(&state);
+    redstone_plan_destroy(&plan);
+    world_destroy(world);
+
+    world = fixture();
+    REQUIRE(sim_set_updates_enabled(world, false) == RS_OK);
+    REQUIRE(sim_use_c(world, MIN, MAX, &test_live) == RS_OK);
+    BlockPos pos = {10,1,8}; /* This repeater has no side-lock input. */
+    BlockState block = world_get(world, pos);
+    SimCEvaluation before, after;
+    REQUIRE(sim_executor_evaluate(world, pos, block, &before) == RS_OK);
+    sim_reset_stats(world);
+    block.data.repeater.powered = !block.data.repeater.powered;
+    REQUIRE(world_set_block(world, pos, block, UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE));
+    REQUIRE(sim_executor_evaluate(world, pos, block, &after) == RS_OK);
+    REQUIRE(evaluation_equal(before, after));
+    REQUIRE(sim_stats(world).c_evaluations == 0 && sim_stats(world).cpu_cache_hits == 1);
+    world_destroy(world);
+}
+
+typedef struct {
+    World *world;
+    RedstoneState state;
+    size_t queries;
+} QueryObserver;
+
+static void query_during_write(void *context, BlockPos pos,
+                                BlockState previous, BlockState current)
+{
+    (void)previous;
+    QueryObserver *observer = context;
+    const RedstonePlan *plan = observer->state.plan;
+    RedstoneNodeId source;
+    REQUIRE(redstone_plan_find(plan, pos, &source));
+    RsResult set = redstone_state_set(&observer->state, source, current);
+    REQUIRE(set == RS_OK || set == RS_UNCHANGED);
+    /* Stored-state invalidation must finish before user observers run. These
+     * reads occur inside synchronous notification, not after the tick settles. */
+    for (size_t target = 0; target < plan->node_count; ++target) {
+        SimCEvaluation expected = {0}, actual = {0};
+        RsResult result = redstone_evaluate(&observer->state, (RedstoneNodeId)target, &expected);
+        REQUIRE(sim_executor_evaluate(observer->world, plan->nodes[target].pos,
+            observer->state.blocks[target], &actual) == result);
+        if (result == RS_OK) {
+            REQUIRE(evaluation_equal(expected, actual));
+            ++observer->queries;
+        }
+    }
+}
+
+static void observer_query_tests(void)
+{
+    World *world = fixture();
+    RedstonePlan plan = {0};
+    QueryObserver observer = {.world = world};
+    REQUIRE(redstone_plan_build(world, (RedstonePlanBounds){MIN,MAX}, &plan) == RS_OK);
+    REQUIRE(redstone_state_build(&plan, &observer.state) == RS_OK);
+    REQUIRE(sim_use_c(world, MIN, MAX, &test_live) == RS_OK);
+    world_set_change_observer(world, query_during_write, &observer);
+    for (unsigned tick = 0; tick < 48; ++tick) {
+        world_set_lever_powered(world, (BlockPos){8,1,8}, (tick / 3) & 1u);
+        world_set_lever_powered(world, (BlockPos){9,1,6}, (tick / 5) & 1u);
+        world_set_lever_powered(world, (BlockPos){8,1,16}, (tick / 4) & 1u);
+        world_set_lever_powered(world, (BlockPos){10,1,14}, (tick / 7) & 1u);
+        if (tick % 9 == 0) REQUIRE(world_toggle_comparator_mode(world, (BlockPos){10,1,16}) == RS_OK);
+        sim_advance_ticks(world, 1);
+        REQUIRE(world_result(world) == RS_OK);
+    }
+    REQUIRE(observer.queries > 0 && sim_c_active(world));
+    world_set_change_observer(world, NULL, NULL);
+    redstone_state_destroy(&observer.state);
+    redstone_plan_destroy(&plan);
+    world_destroy(world);
+}
 #endif
 
 int main(int argc, char **argv)
@@ -691,7 +864,14 @@ int main(int argc, char **argv)
     REQUIRE(argc == 1);
     query_tests();
     attachment_tests();
+    cache_dependency_tests();
+    observer_query_tests();
     live_tests(&test_live, MIN, false);
+    SimCModel conservative = test_live;
+    conservative.read_count = 0;
+    conservative.read_offsets = NULL;
+    conservative.read_targets = NULL;
+    live_tests(&conservative, MIN, false);
     live_tests(&test_boundary, (BlockPos){9,0,4}, true);
     pair_tests(false);
     pair_tests(true);
