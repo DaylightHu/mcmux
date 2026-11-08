@@ -6,6 +6,7 @@
 
 typedef struct{
     Texture2D atlas;
+    Texture2D iron_texture;
     Texture2D glass_texture;
     Texture2D wire_atlas;
     Texture2D torch_atlas;

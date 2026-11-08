@@ -484,6 +484,7 @@ static bool collect_project_headers(Files *headers)
     files_add(headers, RAYLIB_SRC "/raylib.h");
     files_add(headers, RAYLIB_SRC "/raymath.h");
     files_add(headers, RAYLIB_SRC "/rlgl.h");
+    files_add(headers, RAYLIB_SRC "/external/glad.h");
     return true;
 }
 
