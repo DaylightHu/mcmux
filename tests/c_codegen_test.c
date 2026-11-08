@@ -390,6 +390,62 @@ static void notification_tests(void)
     world_destroy(reference); world_destroy(compiled);
 }
 
+static void shape_edit(void *context, BlockPos pos, BlockState previous, BlockState current)
+{
+    NotificationEdit *edit = context;
+    observe(&edit->trace, pos, previous, current);
+    if (!edit->edited && pos_equal(pos, (BlockPos){7,1,8}) &&
+        current.id == BLOCK_REDSTONE_REPEATER && current.data.repeater.locked) {
+        edit->edited = true;
+        BlockState observer = block_default(BLOCK_OBSERVER);
+        observer.data.observer.facing = DIR_EAST;
+        REQUIRE(world_write_visual(edit->world, (BlockPos){9,1,8}, observer));
+    }
+}
+
+static World *shape_fixture(void)
+{
+    World *world = world_create((WorldConfig){0});
+    REQUIRE(world);
+    REQUIRE(world_write_visual(world, (BlockPos){7,0,8}, block_default(BLOCK_IRON)));
+    REQUIRE(world_write_visual(world, (BlockPos){8,0,8}, block_default(BLOCK_IRON)));
+    BlockState repeater = block_default(BLOCK_REDSTONE_REPEATER);
+    repeater.data.repeater.facing = DIR_NORTH;
+    REQUIRE(world_write_visual(world, (BlockPos){7,1,8}, repeater));
+    repeater.data.repeater.facing = DIR_WEST;
+    repeater.data.repeater.powered = true;
+    REQUIRE(world_write_visual(world, (BlockPos){8,1,8}, repeater));
+    return world;
+}
+
+static void shape_mask_tests(void)
+{
+    World *reference = shape_fixture(), *compiled = shape_fixture();
+    BlockPos center = {8,1,8};
+    REQUIRE(sim_use_cpu(compiled, (BlockPos){7,0,8}, center) == RS_OK);
+    uint8_t mask;
+    REQUIRE(sim_executor_shape_mask(compiled, center, &mask));
+    REQUIRE(mask == (1u << DIR_WEST));
+    Chunk *chunk = world_find_chunk(compiled, (BlockPos){0,0,0});
+    REQUIRE(chunk && world_archive_chunk(compiled, chunk));
+    REQUIRE(!sim_executor_shape_mask(compiled, center, &mask));
+    REQUIRE(world_get(compiled, (BlockPos){0,100,0}).id == BLOCK_AIR);
+    REQUIRE(sim_executor_shape_mask(compiled, center, &mask));
+    REQUIRE(mask == (1u << DIR_WEST));
+    NotificationEdit a = {.world = reference}, b = {.world = compiled};
+    world_set_change_observer(reference, shape_edit, &a);
+    world_set_change_observer(compiled, shape_edit, &b);
+    /* The west repeater's shape write installs an observer to the east.
+     * The next direction must use the live world and schedule its pulse. */
+    sim_update_neighbor_shapes(reference, center, UPDATE_KNOWN_SHAPE, 0);
+    sim_update_neighbor_shapes(compiled, center, UPDATE_KNOWN_SHAPE, 0);
+    REQUIRE(a.edited && b.edited && a.trace.count == 2 && b.trace.count == 2);
+    REQUIRE(sim_has_scheduled_tick(compiled, (BlockPos){9,1,8}));
+    compare(reference, compiled, &a.trace, &b.trace);
+    free(a.trace.items); free(b.trace.items);
+    world_destroy(reference); world_destroy(compiled);
+}
+
 static World *pair_fixture(void)
 {
     World *world = fixture();
@@ -877,6 +933,7 @@ int main(int argc, char **argv)
     pair_tests(true);
     instance_attachment_tests();
     notification_tests();
+    shape_mask_tests();
     late_region_tests();
     puts("generated C tests: PASS (queries, ordered writes, pending events, switching, fallback, invalidation)");
     return 0;

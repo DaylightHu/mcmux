@@ -148,12 +148,16 @@ typedef struct {
 } CpuNodeCache;
 
 typedef struct {
+    uint8_t notifications, shapes;
+} CpuNeighborMasks;
+
+typedef struct {
     RedstonePlan plan;
     BlockState *shape; /* Lazily captured region plus its two-cell read halo. */
     RedstoneNodeId *cells;
     size_t size_x, size_y, size_z;
     size_t references;
-    uint8_t *neighbor_masks; /* Shared callback masks include one-cell centers. */
+    CpuNeighborMasks *neighbor_masks; /* Shared masks include one-cell centers. */
     size_t mask_nx, mask_ny, mask_nz;
 } CpuTopology;
 
@@ -507,12 +511,11 @@ static RsResult cpu_evaluate(SimExecutorHost *host, void *context, BlockPos pos,
     return result;
 }
 
-static bool cpu_neighbor_mask(SimExecutorHost *host, void *context,
-                               BlockPos pos, uint8_t *mask)
+static const CpuNeighborMasks *cpu_masks_at(const World *world, CpuExecutor *head,
+                                           BlockPos pos)
 {
-    const World *world = host->world;
-    CpuExecutor *head = context, *cpu = head;
-    if (head->revision != world_revision(world)) return false;
+    CpuExecutor *cpu = head;
+    if (head->revision != world_revision(world)) return NULL;
     if (head->next) {
         CpuExecutor *recent = head->set ? head->set->recent : NULL;
         if (recent && inside(recent->bounds, pos, 1)) cpu = recent;
@@ -521,15 +524,35 @@ static bool cpu_neighbor_mask(SimExecutorHost *host, void *context,
                 if (inside(cpu->bounds, pos, 1)) break;
         }
     }
-    if (!cpu || !cpu_valid(world, cpu) || !cpu->topology->neighbor_masks) return false;
+    if (!cpu || !cpu_valid(world, cpu) || !cpu->topology->neighbor_masks) return NULL;
     const CpuTopology *topology = cpu->topology;
     uint64_t x = (uint64_t)((int64_t)pos.x - cpu->bounds.min.x + 1);
     uint64_t y = (uint64_t)((int64_t)pos.y - cpu->bounds.min.y + 1);
     uint64_t z = (uint64_t)((int64_t)pos.z - cpu->bounds.min.z + 1);
     if (x >= topology->mask_nx || y >= topology->mask_ny || z >= topology->mask_nz)
-        return false;
-    *mask = topology->neighbor_masks[
+        return NULL;
+    return &topology->neighbor_masks[
         ((size_t)y * topology->mask_nz + (size_t)z) * topology->mask_nx + (size_t)x];
+}
+
+static bool cpu_neighbor_mask(SimExecutorHost *host, void *context,
+                              BlockPos pos, uint8_t *mask)
+{
+    const CpuNeighborMasks *masks = cpu_masks_at(host->world, context, pos);
+    if (!masks) return false;
+    *mask = masks->notifications;
+    return true;
+}
+
+static bool cpu_shape_mask(SimExecutorHost *host, void *context,
+                           BlockPos pos, uint8_t *mask)
+{
+    const World *world = host->world;
+    /* A skipped read must not suppress a needed archived-chunk restore. */
+    if (world->chunk_count != world->loaded_count) return false;
+    const CpuNeighborMasks *masks = cpu_masks_at(world, context, pos);
+    if (!masks) return false;
+    *mask = masks->shapes;
     return true;
 }
 
@@ -541,6 +564,14 @@ bool sim_executor_neighbor_mask_active(const World *world, BlockPos center,
     return executor->ops->neighbor_mask(&host, executor->context, center, mask);
 }
 
+bool sim_executor_shape_mask_active(const World *world, BlockPos center,
+                                    uint8_t *mask)
+{
+    SimExecutor *executor = &world->sim->executor;
+    SimExecutorHost host = {(World *)world};
+    return executor->ops->shape_mask(&host, executor->context, center, mask);
+}
+
 static const SimExecutorOps cpu_ops = {
     .flush = reference_flush,
     .scheduled_tick = reference_scheduled_tick,
@@ -549,7 +580,8 @@ static const SimExecutorOps cpu_ops = {
     .destroy = cpu_destroy,
     .stored = cpu_stored,
     .evaluate = cpu_evaluate,
-    .neighbor_mask = cpu_neighbor_mask
+    .neighbor_mask = cpu_neighbor_mask,
+    .shape_mask = cpu_shape_mask
 };
 
 static RsResult backend_change_ready(const World *world)
@@ -592,7 +624,8 @@ static void cpu_build_neighbor_masks(World *world, CpuExecutor *cpu)
      * ordinary walk. Centers extend one cell; their targets stay within the
      * same two-cell halo checked by shape matching and live invalidation. */
     if (nodes <= SIZE_MAX / 16 && count > nodes * 16) return;
-    uint8_t *masks = malloc(count);
+    if (count > SIZE_MAX / sizeof(CpuNeighborMasks)) return;
+    CpuNeighborMasks *masks = malloc(count * sizeof(*masks));
     if (!masks) return;
     static const BlockPos offsets[DIR_COUNT] = {
         [DIR_EAST] = {1,0,0}, [DIR_WEST] = {-1,0,0},
@@ -604,14 +637,16 @@ static void cpu_build_neighbor_masks(World *world, CpuExecutor *cpu)
     for (size_t y = 0; y < dimensions[1]; ++y)
         for (size_t z = 0; z < dimensions[2]; ++z)
             for (size_t x = 0; x < dimensions[0]; ++x) {
-                uint8_t mask = 0;
+                CpuNeighborMasks mask = {0};
                 for (unsigned direction = 0; direction < DIR_COUNT; ++direction) {
                     BlockPos offset = offsets[direction];
                     BlockState block = cpu_sample(world, cpu->bounds.min,
                         (int64_t)x - 1 + offset.x, (int64_t)y - 1 + offset.y,
                         (int64_t)z - 1 + offset.z);
                     if (block_definition((BlockId)block.id)->neighbor_changed)
-                        mask |= 1u << direction;
+                        mask.notifications |= 1u << direction;
+                    if (sim_shape_update_needed(block, direction_opposite((Direction)direction)))
+                        mask.shapes |= 1u << direction;
                 }
                 masks[index++] = mask;
             }

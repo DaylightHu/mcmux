@@ -95,6 +95,7 @@ void sim_neighbor_changed(World *, BlockPos);
 void sim_update_output_neighbors(World *, BlockPos, Direction output);
 void sim_update_shape_at(World *, BlockPos, Direction toward_source,
                           BlockPos source, unsigned flags, unsigned remaining_shapes);
+bool sim_shape_update_needed(BlockState, Direction toward_source);
 void sim_update_neighbor_shapes(World *, BlockPos, unsigned flags, unsigned remaining_shapes);
 BlockState sim_update_from_neighbor_shapes(World *, BlockPos, BlockState);
 void sim_executor_state_changed(World *, StateChange);
