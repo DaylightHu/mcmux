@@ -4,11 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
-enum { FONT_CACHE_SIZE = 64, FALLBACK_SIZE = 16 };
+enum { FONT_CACHE_SIZE = 128, FALLBACK_SIZE = 16 };
 static const char font_path[] = "res/fonts/ComicMono-Bold.ttf";
 /* Rasterize at the requested pixel size so small text stays sharp. */
 static Font fonts[FONT_CACHE_SIZE];
 static bool attempted[FONT_CACHE_SIZE];
+static float font_scale = 1.0f;
 
 static Font font_for_size(int size)
 {
@@ -40,12 +41,29 @@ void ui_font_unload(void)
         if (fonts[i].texture.id) UnloadFont(fonts[i]);
     memset(fonts, 0, sizeof(fonts));
     memset(attempted, 0, sizeof(attempted));
+    font_scale = 1.0f;
+}
+
+void ui_font_set_scale(float scale)
+{
+    font_scale = fmaxf(scale, 1.0f);
 }
 
 void ui_text_draw(const char *text, int x, int y, int size, Color color)
 {
     if (!text || !text[0] || size <= 0) return;
-    DrawTextEx(font_for_size(size), text, (Vector2){(float)x, (float)y}, (float)size, 0, color);
+    Font font = font_for_size(size);
+    float spacing = 0.0f;
+    if (font_scale > 1.0f) {
+        int pixels = (int)fminf(roundf(size*font_scale), FONT_CACHE_SIZE - 1);
+        Font dense = font_for_size(pixels);
+        /* Rasterization rounds glyph advances at each pixel size. Keep
+         * Comic Mono's logical cell width for cursor and selection positions. */
+        spacing = MeasureTextEx(font, "M", (float)size, 0).x -
+                  MeasureTextEx(dense, "M", (float)size, 0).x;
+        font = dense;
+    }
+    DrawTextEx(font, text, (Vector2){(float)x, (float)y}, (float)size, spacing, color);
 }
 
 int ui_text_width(const char *text, int size)

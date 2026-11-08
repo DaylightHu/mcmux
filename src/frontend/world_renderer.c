@@ -11,7 +11,7 @@
 
 enum { REGION_SIZE = 16 };
 enum {
-    SOLIDS, GLASS, DUST, REPEATERS, COMPARATORS,
+    SOLIDS, IRON, GLASS, DUST, REPEATERS, COMPARATORS,
     POWERED_RAILS, ACTIVATOR_RAILS, TORCHES, LEVERS, PARTS
 };
 
@@ -53,7 +53,8 @@ struct WorldRenderer {
 static int part_for(unsigned id)
 {
     switch (id) {
-    case BLOCK_IRON: case BLOCK_REDSTONE_BLOCK: case BLOCK_OBSERVER:
+    case BLOCK_IRON: return IRON;
+    case BLOCK_REDSTONE_BLOCK: case BLOCK_OBSERVER:
     case BLOCK_PISTON: case BLOCK_STICKY_PISTON: case BLOCK_BARREL:
     case BLOCK_SLIME: case BLOCK_NOTE_BLOCK: case BLOCK_HONEY:
     case BLOCK_TARGET: case BLOCK_HOPPER: case BLOCK_DROPPER:
@@ -72,9 +73,20 @@ static int part_for(unsigned id)
     }
 }
 
+static bool solid_part(int kind)
+{
+    return kind == SOLIDS || kind == IRON;
+}
+
+static void dirty_solid_parts(RenderRegion *region)
+{
+    region->parts[SOLIDS].dirty = true;
+    region->parts[IRON].dirty = true;
+}
+
 static bool state_solid(BlockState state)
 {
-    if (part_for(state.id) != SOLIDS) return false;
+    if (!solid_part(part_for(state.id))) return false;
     /* Vanilla honey uses noOcclusion and an inset collision shape. */
     if (state.id == BLOCK_HONEY || state.id == BLOCK_HOPPER) return false;
     if (block_is_piston_head((BlockId)state.id)) return false;
@@ -126,7 +138,7 @@ static void on_change(void *context, BlockPos p, BlockState before, BlockState a
         for (Direction face = 0; face < DIR_COUNT; ++face) {
             RenderRegion *neighbor = find_region(r,block_offset(p,face));
             if (!neighbor) continue;
-            if (solid_changed) neighbor->parts[SOLIDS].dirty = true;
+            if (solid_changed) dirty_solid_parts(neighbor);
             if (cube_changed) neighbor->parts[GLASS].dirty = true;
         }
     }
@@ -249,9 +261,9 @@ static bool rebuild_part(WorldRenderer *r, size_t region_id, int kind)
         BlockPos p = {x,y,z};
         RenderCell *cell = &region->cells[section_index(p)];
         if (part_for(cell->state.id) != kind) continue;
-        if (kind == SOLIDS || kind == GLASS) {
-            cell->solid_faces = (uint8_t)(kind == SOLIDS ? visible_faces(r,p) :
-                                                           visible_glass_faces(r,p));
+        if (solid_part(kind) || kind == GLASS) {
+            cell->solid_faces = (uint8_t)(kind == GLASS ? visible_glass_faces(r,p) :
+                                                           visible_faces(r,p));
             quads += cell->state.id == BLOCK_HOPPER ? HOPPER_QUAD_COUNT :
                      (int)bit_count(cell->solid_faces);
             if (block_is_piston_head((BlockId)cell->state.id)) quads += 4;
@@ -394,7 +406,7 @@ WorldRenderer *world_renderer_create(World *world, const BlockRenderer *blocks)
     if (!r) return NULL;
     r->blocks = blocks; r->world = world; r->topology_revision = UINT64_MAX;
     const Texture2D textures[] = {
-        blocks->atlas, blocks->glass_texture, blocks->wire_atlas,
+        blocks->atlas, blocks->iron_texture, blocks->glass_texture, blocks->wire_atlas,
         blocks->repeater_atlas, blocks->comparator_atlas,
         blocks->powered_rail_atlas, blocks->activator_rail_atlas,
         blocks->torch_atlas, blocks->lever_atlas
@@ -403,7 +415,7 @@ WorldRenderer *world_renderer_create(World *world, const BlockRenderer *blocks)
         r->materials[kind] = LoadMaterialDefault();
         if (!r->materials[kind].maps) { world_renderer_destroy(r); return NULL; }
         r->materials[kind].maps[MATERIAL_MAP_DIFFUSE].texture = textures[kind];
-        if (kind != SOLIDS) r->materials[kind].shader = blocks->cutout_shader;
+        if (!solid_part(kind)) r->materials[kind].shader = blocks->cutout_shader;
     }
     world_set_change_observer(world,on_change,r);
     return r;
@@ -424,7 +436,7 @@ bool world_renderer_sync(WorldRenderer *r)
         plot.min_z != r->plot.min_z || plot.max_z != r->plot.max_z) {
         /* Border faces can change without a retained cell being written. */
         for (size_t i = 0; i < r->region_count; ++i) {
-            r->regions[i]->parts[SOLIDS].dirty = true;
+            dirty_solid_parts(r->regions[i]);
             r->regions[i]->parts[GLASS].dirty = true;
         }
         r->plot = plot;

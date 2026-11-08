@@ -13,12 +13,15 @@
 #include "tick_command.h"
 #include "voxel_pick.h"
 #include "world_renderer.h"
+#include "world_msaa.h"
 #include "workspace_layout.h"
 #include "workspace_editor.h"
 #include "workspace_output.h"
 #include "workspace_code.h"
 #include "world_session_manager.h"
 #include "raylib.h"
+#include "raymath.h"
+#include "rlgl.h"
 #include "rs/session.h"
 
 #include <ctype.h>
@@ -43,6 +46,25 @@ enum {
 };
 
 static const char save_directory[] = "saves";
+
+static void begin_gui_target(RenderTexture2D target)
+{
+    BeginTextureMode(target);
+    /* Keep widgets in logical units while the viewport uses target pixels. */
+    rlSetMatrixProjection(MatrixOrtho(0, gui_view_width(), gui_view_height(),
+                                      0, 0.0, 1.0));
+}
+
+static void begin_gui_scissor(int x, int y, int width, int height)
+{
+    float scale_x = (float)GetRenderWidth()/gui_view_width();
+    float scale_y = (float)GetRenderHeight()/gui_view_height();
+    int left = (int)roundf(x*scale_x);
+    int top = (int)roundf(y*scale_y);
+    int right = (int)roundf((x + width)*scale_x);
+    int bottom = (int)roundf((y + height)*scale_y);
+    BeginScissorMode(left, top, right - left, bottom - top);
+}
 
 typedef enum {
     GUI_TITLE,
@@ -106,6 +128,7 @@ typedef struct {
     /* Borrowed from the host; frontends may select sessions but do not own them. */
     WorldSessionManager *world_sessions;
     RenderTexture2D gui_target;
+    WorldMsaa world_msaa;
     Texture2D title_background;
     bool pane_prefix, pane_help;
     bool window_gui_visible, window_text_visible, window_resize_pending;
@@ -373,6 +396,7 @@ static void close_world(GuiApp *app)
     release_mouse(app);
     app->pane_prefix = app->pane_help = false;
     gui_view_reset();
+    world_msaa_destroy(&app->world_msaa);
     world_renderer_destroy(app->world_renderer);
     app->world_renderer = NULL;
     app->session = NULL;
@@ -701,7 +725,7 @@ static void draw_title(GuiApp *app)
                  TITLE_LABEL_SIZE, ink);
     Rectangle list = layout.list;
     DrawRectangleLinesEx(list, 2.0f, (Color){226, 207, 96, 255});
-    BeginScissorMode((int)list.x + 2, (int)list.y + 2,
+    begin_gui_scissor((int)list.x + 2, (int)list.y + 2,
                      (int)list.width - 4, (int)list.height - 4);
     if (!app->saves.count) {
         ui_text_draw("No saved worlds yet", (int)list.x + 22,
@@ -1528,6 +1552,8 @@ static void draw_selection(GuiApp *app)
 
 static void draw_world(GuiApp *app, VoxelHit hit)
 {
+    /* BeginTextureMode already set the viewport and matrices to this size. */
+    if (app->world_msaa.id) rlEnableFramebuffer(app->world_msaa.id);
     ClearBackground((Color){184, 211, 214, 255});
     BeginMode3D(app->camera);
         world_renderer_draw(app->world_renderer);
@@ -1540,6 +1566,8 @@ static void draw_world(GuiApp *app, VoxelHit hit)
         if (app->workspace.focus == 0) draw_flexible_placement(app, hit);
         draw_selection(app);
     EndMode3D();
+    if (app->world_msaa.id)
+        world_msaa_resolve(&app->world_msaa, app->gui_target.id);
 
     if (app->screen == GUI_WORLD && app->workspace.focus == 0) {
         int cx = gui_view_width()/2;
@@ -1678,7 +1706,7 @@ static void draw_command(const GuiApp *app)
         text_x -= cursor_x - right;
         cursor_x = right;
     }
-    BeginScissorMode(20, y + 2, width - 4, 48);
+    begin_gui_scissor(20, y + 2, width - 4, 48);
     ui_text_draw(text, text_x, y + 15, 21, RAYWHITE);
     if (((int)(GetTime()*2.0)) % 2 == 0)
         DrawLine(cursor_x, y + 11, cursor_x, y + 40, RAYWHITE);
@@ -1702,7 +1730,6 @@ static void draw_pause(GuiApp *app)
     Rectangle save = {(float)center - 140, 265, 280, 44};
     Rectangle title = {(float)center - 140, 325, 280, 44};
     Rectangle exit = {(float)center - 140, 385, 280, 44};
-
     if (button(resume, "Continue", active)) {
         app->screen = GUI_WORLD;
         if (app->workspace.focus == 0) capture_mouse(app);
@@ -1804,7 +1831,11 @@ static bool initialize(GuiApp *app, WorldSessionManager *world_sessions)
     snprintf(app->message, sizeof(app->message),
              "Create a world or load an existing .mcw file");
 
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+    unsigned int window_flags = FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT;
+#if defined(__APPLE__)
+    window_flags |= FLAG_WINDOW_HIGHDPI;
+#endif
+    SetConfigFlags(window_flags);
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "mcmux");
     SetWindowMinSize(1000, 650);
     SetExitKey(KEY_NULL);
@@ -2019,7 +2050,14 @@ static bool prepare_program_run(void *context, WorkspaceEditor *editor)
 static bool prepare_gui_view(GuiApp *app)
 {
     gui_view_reset();
-    if (!app->workspace.gui_visible) return true;
+    /* Outside BeginTextureMode, these dimensions describe the window. */
+    float scale_x = (float)GetRenderWidth()/GetScreenWidth();
+    float scale_y = (float)GetRenderHeight()/GetScreenHeight();
+    ui_font_set_scale(scale_y);
+    if (!app->workspace.gui_visible) {
+        world_msaa_destroy(&app->world_msaa);
+        return true;
+    }
     WorkspaceGeometry geometry;
     workspace_geometry(app, &geometry);
     Rectangle box = pane_rectangle(geometry.gui);
@@ -2028,10 +2066,12 @@ static bool prepare_gui_view(GuiApp *app)
     int width = (int)box.width, height = (int)box.height;
     if (width < 640) width = 640;
     if (height < 560) height = 560;
-    if (!app->gui_target.id || app->gui_target.texture.width != width ||
-        app->gui_target.texture.height != height) {
-        RenderTexture2D target = LoadRenderTexture(width, height);
-        if (!target.id || !target.texture.id) {
+    int pixel_width = (int)roundf(width*scale_x);
+    int pixel_height = (int)roundf(height*scale_y);
+    if (!app->gui_target.id || app->gui_target.texture.width != pixel_width ||
+        app->gui_target.texture.height != pixel_height) {
+        RenderTexture2D target = LoadRenderTexture(pixel_width, pixel_height);
+        if (!target.id || !target.texture.id || !rlFramebufferComplete(target.id)) {
             if (target.id) UnloadRenderTexture(target);
             fprintf(stderr, "Cannot create GUI pane render target\n");
             app->fatal_error = true;
@@ -2042,6 +2082,10 @@ static bool prepare_gui_view(GuiApp *app)
         if (app->gui_target.id) UnloadRenderTexture(app->gui_target);
         app->gui_target = target;
     }
+    if (app->session && app->screen != GUI_TITLE &&
+        app->screen != GUI_SAVE_ERROR)
+        world_msaa_prepare(&app->world_msaa, pixel_width, pixel_height);
+    else world_msaa_destroy(&app->world_msaa);
     gui_view_set(box, width, height);
     return true;
 }
@@ -2333,7 +2377,7 @@ static void draw_workspace(GuiApp *app, VoxelHit hit)
     workspace_geometry(app, &geometry);
     ClearBackground((Color){9, 12, 18, 255});
     if (app->workspace.gui_visible) {
-        BeginTextureMode(app->gui_target);
+        begin_gui_target(app->gui_target);
         if (app->screen == GUI_TITLE) {
             draw_title(app);
         } else if (app->screen == GUI_SAVE_ERROR) {

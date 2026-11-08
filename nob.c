@@ -88,6 +88,7 @@ static const char *gui_sources[] = {
     "src/frontend/world_session_manager.c",
     "src/frontend/block_renderer.c",
     "src/frontend/world_renderer.c",
+    "src/frontend/world_msaa.c",
     "src/frontend/voxel_pick.c",
     "src/frontend/flexible_placement.c",
     "src/frontend/block_shape.c",
@@ -484,6 +485,7 @@ static bool collect_project_headers(Files *headers)
     files_add(headers, RAYLIB_SRC "/raylib.h");
     files_add(headers, RAYLIB_SRC "/raymath.h");
     files_add(headers, RAYLIB_SRC "/rlgl.h");
+    files_add(headers, RAYLIB_SRC "/external/glad.h");
     return true;
 }
 

@@ -1,5 +1,6 @@
 #include "block_renderer.h"
 #include "rlgl.h"
+#include "external/glad.h"
 #include "hopper_shape.h"
 
 #include <stddef.h>
@@ -9,7 +10,7 @@ enum {
     TILE_SIZE = 32,
     OBSERVER_TEXTURES = 4,
     OBSERVER_STATES = 2,
-    OBSERVER_TILE_FIRST = 2,
+    OBSERVER_TILE_FIRST = 1,
     PISTON_TILE_FIRST = OBSERVER_TILE_FIRST +
                         OBSERVER_TEXTURES*OBSERVER_STATES,
     PISTON_TEXTURES = 5,
@@ -146,7 +147,6 @@ static Image load_tile(const char *path)
 static Image create_solid_atlas(void)
 {
     static const char *const paths[TILE_COUNT] = {
-        "res/textures/block/iron_block.png",
         "res/textures/block/redstone_block.png",
         "res/textures/block/observer_back0.png",
         "res/textures/block/observer_front0.png",
@@ -481,6 +481,32 @@ bool block_renderer_init(BlockRenderer *renderer)
     SetTextureFilter(renderer->atlas, TEXTURE_FILTER_POINT);
     SetTextureWrap(renderer->atlas, TEXTURE_WRAP_CLAMP);
 
+    Image iron = load_tile("res/textures/block/iron_block.png");
+    if (iron.data) {
+        renderer->iron_texture = LoadTextureFromImage(iron);
+        UnloadImage(iron);
+    }
+    if (!renderer->iron_texture.id) {
+        TraceLog(LOG_ERROR, "BLOCK TEXTURE: Cannot load the iron texture");
+        block_renderer_unload(renderer);
+        return false;
+    }
+    /* A separate texture lets small mip levels average just the iron tile.
+     * Keep pixel edges sharp when the tile is magnified. */
+    SetTextureWrap(renderer->iron_texture, TEXTURE_WRAP_CLAMP);
+    GenTextureMipmaps(&renderer->iron_texture);
+    SetTextureFilter(renderer->iron_texture, TEXTURE_FILTER_TRILINEAR);
+    rlTextureParameters(renderer->iron_texture.id, RL_TEXTURE_MAG_FILTER,
+                        RL_TEXTURE_FILTER_NEAREST);
+    if (renderer->iron_texture.mipmaps > 1 &&
+        (GLAD_GL_EXT_texture_filter_anisotropic || GLAD_GL_ARB_texture_filter_anisotropic)) {
+        float maximum = 1.0f;
+        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &maximum);
+        if (maximum >= 2.0f)
+            rlTextureParameters(renderer->iron_texture.id, RL_TEXTURE_FILTER_ANISOTROPIC,
+                                (int)(maximum < 8.0f ? maximum : 8.0f));
+    }
+
     Image glass = load_tile("res/textures/block/glass.png");
     if (glass.data) {
         renderer->glass_texture = LoadTextureFromImage(glass);
@@ -619,8 +645,16 @@ void block_renderer_unload(BlockRenderer *renderer)
     if (renderer->torch_atlas.id) UnloadTexture(renderer->torch_atlas);
     if (renderer->wire_atlas.id) UnloadTexture(renderer->wire_atlas);
     if (renderer->glass_texture.id) UnloadTexture(renderer->glass_texture);
+    if (renderer->iron_texture.id) UnloadTexture(renderer->iron_texture);
     if (renderer->atlas.id) UnloadTexture(renderer->atlas);
     *renderer = (BlockRenderer){0};
+}
+
+static Texture2D cube_texture(const BlockRenderer *renderer, BlockId id)
+{
+    if (id == BLOCK_IRON) return renderer->iron_texture;
+    if (id == BLOCK_GLASS) return renderer->glass_texture;
+    return renderer->atlas;
 }
 
 void block_renderer_draw_cube(const BlockRenderer *renderer, BlockId id,
@@ -629,19 +663,15 @@ void block_renderer_draw_cube(const BlockRenderer *renderer, BlockId id,
     if (!renderer || !renderer->atlas.id) return;
 
     int tile = 0;
-    Texture2D texture = renderer->atlas;
+    Texture2D texture = cube_texture(renderer, id);
+    if (!texture.id) return;
     switch (id) {
-    case BLOCK_IRON:           tile = 0; break;
-    case BLOCK_REDSTONE_BLOCK: tile = 1; break;
+    case BLOCK_IRON: case BLOCK_REDSTONE_BLOCK: case BLOCK_GLASS: break;
     case BLOCK_SLIME:          tile = SLIME_TILE; break;
     case BLOCK_NOTE_BLOCK:     tile = NOTE_BLOCK_TILE; break;
     case BLOCK_HONEY:          tile = HONEY_TILE; break;
     case BLOCK_TARGET:         tile = TARGET_TILE; break;
     case BLOCK_REDSTONE_LAMP:  tile = LAMP_OFF_TILE; break;
-    case BLOCK_GLASS:
-        texture = renderer->glass_texture;
-        if (!texture.id) return;
-        break;
     default: return;
     }
 
@@ -1316,10 +1346,8 @@ int block_renderer_build_uv(const BlockRenderer *renderer, BlockState state,
         state.id == BLOCK_GLASS || state.id == BLOCK_SLIME ||
         state.id == BLOCK_NOTE_BLOCK || state.id == BLOCK_HONEY ||
         state.id == BLOCK_TARGET || state.id == BLOCK_REDSTONE_LAMP) {
-        bool glass = state.id == BLOCK_GLASS;
-        Texture2D texture = glass ? renderer->glass_texture : renderer->atlas;
-        int tile = state.id == BLOCK_REDSTONE_BLOCK ? 1 :
-                   state.id == BLOCK_SLIME ? SLIME_TILE :
+        Texture2D texture = cube_texture(renderer, (BlockId)state.id);
+        int tile = state.id == BLOCK_SLIME ? SLIME_TILE :
                    state.id == BLOCK_NOTE_BLOCK ? NOTE_BLOCK_TILE :
                    state.id == BLOCK_HONEY ? HONEY_TILE :
                    state.id == BLOCK_TARGET ? TARGET_TILE :
