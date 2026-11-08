@@ -129,7 +129,6 @@ typedef struct {
     WorldSessionManager *world_sessions;
     RenderTexture2D gui_target;
     WorldMsaa world_msaa;
-    bool world_msaa_enabled;
     Texture2D title_background;
     bool pane_prefix, pane_help;
     bool window_gui_visible, window_text_visible, window_resize_pending;
@@ -1731,8 +1730,6 @@ static void draw_pause(GuiApp *app)
     Rectangle save = {(float)center - 140, 265, 280, 44};
     Rectangle title = {(float)center - 140, 325, 280, 44};
     Rectangle exit = {(float)center - 140, 385, 280, 44};
-    Rectangle antialias = {(float)center - 140, 445, 280, 44};
-
     if (button(resume, "Continue", active)) {
         app->screen = GUI_WORLD;
         if (app->workspace.focus == 0) capture_mouse(app);
@@ -1763,12 +1760,6 @@ static void draw_pause(GuiApp *app)
     if (button(exit, "Save and close GUI", active)) {
         request_save_action(app, AFTER_SAVE_GUI_DETACH);
         return;
-    }
-    const char *msaa_label = !app->world_msaa_enabled ? "MSAA: Off" :
-                            app->world_msaa.id ? "MSAA: 4x" : "MSAA: Unavailable";
-    if (button(antialias, msaa_label, active)) {
-        app->world_msaa_enabled = !app->world_msaa_enabled;
-        if (!app->world_msaa_enabled) world_msaa_destroy(&app->world_msaa);
     }
 }
 
@@ -1837,7 +1828,6 @@ static bool initialize(GuiApp *app, WorldSessionManager *world_sessions)
     app->running = true;
     app->selected_save = -1;
     app->screen = GUI_TITLE;
-    app->world_msaa_enabled = true;
     snprintf(app->message, sizeof(app->message),
              "Create a world or load an existing .mcw file");
 
@@ -2092,8 +2082,8 @@ static bool prepare_gui_view(GuiApp *app)
         if (app->gui_target.id) UnloadRenderTexture(app->gui_target);
         app->gui_target = target;
     }
-    if (app->world_msaa_enabled && app->session &&
-        app->screen != GUI_TITLE && app->screen != GUI_SAVE_ERROR)
+    if (app->session && app->screen != GUI_TITLE &&
+        app->screen != GUI_SAVE_ERROR)
         world_msaa_prepare(&app->world_msaa, pixel_width, pixel_height);
     else world_msaa_destroy(&app->world_msaa);
     gui_view_set(box, width, height);
