@@ -96,6 +96,10 @@ typedef struct {
     size_t input_fallback_node_count;
     uint64_t source_tick, source_revision;
     PosMap positions; /* BlockPos -> RedstoneNodeId. */
+    /* Live plans assign external source IDs down from REDSTONE_NODE_NONE - 1. */
+    BlockPos *external_sources;
+    size_t external_count;
+    bool live_inputs;
 } RedstonePlan;
 
 void redstone_plan_init(RedstonePlan *plan);
@@ -110,6 +114,15 @@ void redstone_plan_destroy(RedstonePlan *plan);
  * so an executor cannot silently treat an open plan as closed. */
 RsResult redstone_plan_build(const World *world, RedstonePlanBounds bounds,
                              RedstonePlan *plan);
+RsResult redstone_plan_build_live(const World *world, RedstonePlanBounds bounds,
+                                  RedstonePlan *plan);
+
+static inline bool redstone_plan_is_external(const RedstonePlan *plan,
+                                             RedstoneNodeId source)
+{
+    return source >= plan->node_count && source != REDSTONE_NODE_NONE &&
+           REDSTONE_NODE_NONE - 1 - source < plan->external_count;
+}
 
 bool redstone_plan_find(const RedstonePlan *plan, BlockPos pos,
                         RedstoneNodeId *node);

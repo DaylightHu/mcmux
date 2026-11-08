@@ -48,5 +48,10 @@ RsResult redstone_state_signal(const RedstoneState *state, RedstoneNodeId node,
                                uint8_t *output);
 RsResult redstone_evaluate(const RedstoneState *state, RedstoneNodeId node,
                            RedstoneEvaluation *output);
+/* Sample external inputs from the world at this exact callback. The caller
+ * must not retain a result that read external state in a local-only cache. */
+RsResult redstone_evaluate_live(const RedstoneState *state, RedstoneNodeId node,
+                                const World *world, BlockPos origin,
+                                RedstoneEvaluation *output, bool *read_external);
 
 #endif

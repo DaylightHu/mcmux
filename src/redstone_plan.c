@@ -8,7 +8,7 @@
 
 typedef struct {
     RedstonePlan plan;
-    size_t node_capacity, edge_capacity, input_capacity;
+    size_t node_capacity, edge_capacity, input_capacity, external_capacity;
 } PlanBuilder;
 
 static bool bounds_contain(RedstonePlanBounds bounds, BlockPos pos)
@@ -157,6 +157,27 @@ static bool append_input(PlanBuilder *builder, RedstoneNodeId source,
     return true;
 }
 
+static bool append_external_input(PlanBuilder *builder, BlockPos pos,
+                                   RedstoneInputKind kind, uint8_t face,
+                                   uint8_t attenuation)
+{
+    RedstonePlan *plan = &builder->plan;
+    if (plan->external_count >= UINT32_MAX - plan->node_count) return false;
+    if (plan->external_count == builder->external_capacity) {
+        size_t capacity = builder->external_capacity;
+        if (capacity > SIZE_MAX / 2 / sizeof(*plan->external_sources)) return false;
+        capacity = capacity ? capacity * 2 : 16;
+        BlockPos *sources = realloc(plan->external_sources, capacity * sizeof(*sources));
+        if (!sources) return false;
+        plan->external_sources = sources;
+        builder->external_capacity = capacity;
+    }
+    RedstoneNodeId source = REDSTONE_NODE_NONE - 1 - (RedstoneNodeId)plan->external_count;
+    if (!append_input(builder, source, kind, face, attenuation)) return false;
+    plan->external_sources[plan->external_count++] = pos;
+    return true;
+}
+
 bool redstone_plan_find(const RedstonePlan *plan, BlockPos pos,
                         RedstoneNodeId *node)
 {
@@ -285,10 +306,18 @@ static bool add_input_with_face(const World *world, PlanBuilder *builder,
 
     RedstoneNodeId source;
     if (!redstone_plan_find(&builder->plan, source_pos, &source)) {
-        /* A matched source outside the selected region makes the semantic
-         * input list deliberately incomplete rather than silently constant. */
-        if (!bounds_contain(builder->plan.bounds, source_pos))
+        if (!bounds_contain(builder->plan.bounds, source_pos)) {
             target->flags |= REDSTONE_NODE_BOUNDARY;
+            if (builder->plan.live_inputs) {
+                /* Container overrides depend on more than a signal level. */
+                if (rule == INPUT_SOURCE_ANALOG) {
+                    if (!(target->flags & REDSTONE_NODE_INPUT_FALLBACK))
+                        ++builder->plan.input_fallback_node_count;
+                    target->flags |= REDSTONE_NODE_INPUT_FALLBACK;
+                } else return append_external_input(builder, source_pos, kind,
+                                                    source_face, attenuation);
+            }
+        }
         return true;
     }
     for (size_t index = target->first_input;
@@ -514,6 +543,7 @@ static bool build_consumers(PlanBuilder *builder)
         for (size_t offset = 0; offset < node->input_count; ++offset) {
             RedstonePlanInput input =
                 plan->inputs[node->first_input + offset];
+            if (redstone_plan_is_external(plan, input.source)) continue;
             if (input.source >= plan->node_count ||
                 counts[input.source] == UINT16_MAX) goto fail;
             ++counts[input.source];
@@ -530,7 +560,7 @@ static bool build_consumers(PlanBuilder *builder)
         if (counts[source] > SIZE_MAX - first) goto fail;
         first += counts[source];
     }
-    if (first != plan->input_count) goto fail;
+    if (first != plan->input_count - plan->external_count) goto fail;
 
     if (first) {
         plan->consumers = malloc(first*sizeof(*plan->consumers));
@@ -541,6 +571,7 @@ static bool build_consumers(PlanBuilder *builder)
         for (size_t offset = 0; offset < node->input_count; ++offset) {
             RedstonePlanInput input =
                 plan->inputs[node->first_input + offset];
+            if (redstone_plan_is_external(plan, input.source)) continue;
             plan->consumers[cursors[input.source]++] =
                 (RedstonePlanConsumer){
                     .target = (RedstoneNodeId)target,
@@ -571,24 +602,27 @@ void redstone_plan_destroy(RedstonePlan *plan)
     free(plan->edges);
     free(plan->inputs);
     free(plan->consumers);
+    free(plan->external_sources);
     posmap_destroy(&plan->positions);
     *plan = (RedstonePlan){0};
 }
 
-RsResult redstone_plan_build(const World *world, RedstonePlanBounds bounds,
-                             RedstonePlan *destination)
+static RsResult build_plan(const World *world, RedstonePlanBounds bounds,
+                            RedstonePlan *destination, bool live_inputs)
 {
     if (!world || !destination || destination->nodes || destination->edges ||
         destination->inputs || destination->consumers ||
         destination->positions.entries || destination->node_count ||
         destination->edge_count || destination->input_count ||
-        destination->consumer_count ||
+        destination->consumer_count || destination->external_sources ||
+        destination->external_count ||
         !bounds_valid(world, bounds))
         return RS_INVALID_ARGUMENT;
     RsResult result = world_result(world);
     if (result != RS_OK) return result;
 
     PlanBuilder builder = {0};
+    builder.plan.live_inputs = live_inputs;
     builder.plan.bounds = bounds;
     builder.plan.source_tick = world_tick(world);
     builder.plan.source_revision = world_revision(world);
@@ -631,4 +665,16 @@ RsResult redstone_plan_build(const World *world, RedstonePlanBounds bounds,
 fail:
     redstone_plan_destroy(&builder.plan);
     return result;
+}
+
+RsResult redstone_plan_build(const World *world, RedstonePlanBounds bounds,
+                             RedstonePlan *destination)
+{
+    return build_plan(world, bounds, destination, false);
+}
+
+RsResult redstone_plan_build_live(const World *world, RedstonePlanBounds bounds,
+                                  RedstonePlan *destination)
+{
+    return build_plan(world, bounds, destination, true);
 }

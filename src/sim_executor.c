@@ -139,7 +139,7 @@ RsResult sim_executor_evaluate_active(const World *world, BlockPos pos,
     return result;
 }
 
-enum { CPU_CACHE_EMPTY, CPU_CACHE_VALUE, CPU_CACHE_UNSUPPORTED };
+enum { CPU_CACHE_EMPTY, CPU_CACHE_VALUE, CPU_CACHE_UNSUPPORTED, CPU_CACHE_LIVE_VALUE };
 typedef struct {
     RedstoneEvaluation value;
     uint32_t visited;
@@ -159,6 +159,7 @@ typedef struct {
     size_t references;
     CpuNeighborMasks *neighbor_masks; /* Shared masks include one-cell centers. */
     size_t mask_nx, mask_ny, mask_nz;
+    WorldPlotBounds live_plot;
 } CpuTopology;
 
 typedef struct CpuRegionSet CpuRegionSet;
@@ -171,7 +172,7 @@ typedef struct CpuExecutor {
     CpuNodeCache *cache;
     uint64_t revision;
     uint32_t generation;
-    bool valid, packed;
+    bool valid, packed, live_inputs;
     const SimCModel *model;
     struct CpuExecutor *next;
     CpuRegionSet *set; /* Only the list head owns multi-region metadata. */
@@ -327,9 +328,16 @@ static bool cpu_valid(const World *world, const CpuExecutor *cpu)
     return cpu->valid && !world->sim->piston_motions.active;
 }
 
+static bool cpu_live_plot_matches(const World *world, const CpuExecutor *cpu)
+{
+    WorldPlotBounds plot = cpu->topology->live_plot;
+    return plot.min_x == world->plot.min_x && plot.max_x == world->plot.max_x &&
+           plot.min_z == world->plot.min_z && plot.max_z == world->plot.max_z;
+}
+
 static RsResult cpu_invalidate(CpuExecutor *cpu, RedstoneNodeId source)
 {
-    if (cpu->model && cpu->model->read_offsets) {
+    if (cpu->model && cpu->model->read_offsets && !cpu->live_inputs) {
         const SimCModel *model = cpu->model;
         for (size_t i = model->read_offsets[source];
              i < model->read_offsets[source + 1]; ++i)
@@ -490,6 +498,17 @@ static RsResult cpu_evaluate(SimExecutorHost *host, void *context, BlockPos pos,
         *output = cache->value;
         return RS_OK;
     }
+    bool live = cpu->live_inputs;
+    if (live && (world->chunk_count != world->loaded_count ||
+                 !cpu_live_plot_matches(world, cpu))) {
+        ++world->sim->stats.cpu_fallbacks;
+        return RS_UNSUPPORTED;
+    }
+    if (cache->cached == CPU_CACHE_LIVE_VALUE) {
+        ++world->sim->stats.cpu_cache_hits;
+        *output = cache->value;
+        return RS_OK;
+    }
     if (cache->cached == CPU_CACHE_UNSUPPORTED) {
         ++world->sim->stats.cpu_fallbacks;
         return RS_UNSUPPORTED;
@@ -497,12 +516,26 @@ static RsResult cpu_evaluate(SimExecutorHost *host, void *context, BlockPos pos,
     RedstoneEvaluation value;
     RsResult result = cpu->model ?
         cpu->model->evaluate(cpu->state.blocks, node, &value) :
-        redstone_evaluate(&cpu->state, node, &value);
+        live ? RS_UNSUPPORTED : redstone_evaluate(&cpu->state, node, &value);
+    if (live && result == RS_UNSUPPORTED) {
+        bool read_external;
+        result = redstone_evaluate_live(&cpu->state, node, world, cpu->bounds.min,
+                                        &value, &read_external);
+        if (result == RS_OK) {
+            ++world->sim->stats.cpu_evaluations;
+            if (!read_external) {
+                cache->value = value;
+                cache->cached = CPU_CACHE_LIVE_VALUE;
+            }
+            *output = value;
+            return RS_OK;
+        }
+    }
     if (result == RS_OK) {
         ++world->sim->stats.cpu_evaluations;
         if (cpu->model) ++world->sim->stats.c_evaluations;
         cache->value = value;
-        cache->cached = CPU_CACHE_VALUE;
+        cache->cached = live ? CPU_CACHE_LIVE_VALUE : CPU_CACHE_VALUE;
         *output = value;
     } else if (result == RS_UNSUPPORTED) {
         ++world->sim->stats.cpu_fallbacks;
@@ -803,6 +836,7 @@ static RsResult cpu_prepare(World *world, CpuExecutor *cpu, bool instance)
             return RS_INTERNAL_ERROR;
     cpu->revision = world_revision(world);
     cpu->valid = true;
+    cpu->live_inputs = plan->live_inputs;
     return RS_OK;
 }
 
@@ -832,6 +866,15 @@ static RsResult use_cpu(World *world, BlockPos min, BlockPos max,
     if (model && !redstone_c_matches(&cpu->topology->plan, model)) {
         result = RS_UNSUPPORTED;
         goto fail;
+    }
+    if (cpu->topology->plan.boundary_node_count) {
+        RedstonePlan live = {0};
+        result = redstone_plan_build_live(world, cpu->bounds, &live);
+        if (result == RS_OK) {
+            redstone_plan_destroy(&cpu->topology->plan);
+            cpu->topology->plan = live;
+            cpu->topology->live_plot = world->plot;
+        } else if (result != RS_OUT_OF_MEMORY || world_result(world) != RS_OK) goto fail;
     }
     cpu_build_lookup(cpu->topology);
     cpu_build_neighbor_masks(world, cpu);
@@ -899,7 +942,8 @@ RsResult sim_add_cpu_instance(World *world, BlockPos prototype_min,
         if (pos_equal(cpu->bounds.min, prototype_min)) source = cpu;
         tail = cpu;
     }
-    if (!source || !cpu_valid(world, source)) return RS_UNSUPPORTED;
+    if (!source || !cpu_valid(world, source) ||
+        (source->live_inputs && !cpu_live_plot_matches(world, source))) return RS_UNSUPPORTED;
     RedstonePlanBounds bounds = {.min = instance_min};
     int64_t x = (int64_t)instance_min.x + source->bounds.max.x - source->bounds.min.x;
     int64_t y = (int64_t)instance_min.y + source->bounds.max.y - source->bounds.min.y;
@@ -959,7 +1003,8 @@ bool sim_cpu_active(const World *world)
     const CpuExecutor *head = world->sim->executor.context;
     if (head->revision != world_revision(world)) return false;
     for (const CpuExecutor *cpu = head; cpu; cpu = cpu->next)
-        if (cpu_valid(world, cpu)) return true;
+        if (cpu_valid(world, cpu) &&
+            (!cpu->live_inputs || cpu_live_plot_matches(world, cpu))) return true;
     return false;
 }
 
@@ -967,6 +1012,7 @@ bool sim_c_active(const World *world)
 {
     if (!sim_cpu_active(world)) return false;
     for (const CpuExecutor *cpu = world->sim->executor.context; cpu; cpu = cpu->next)
-        if (cpu->model && cpu_valid(world, cpu)) return true;
+        if (cpu->model && cpu_valid(world, cpu) &&
+            (!cpu->live_inputs || cpu_live_plot_matches(world, cpu))) return true;
     return false;
 }

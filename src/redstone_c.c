@@ -108,7 +108,7 @@ static void topology(const RedstonePlan *plan, Topology *sink)
 
 bool redstone_c_matches(const RedstonePlan *plan, const SimCModel *model)
 {
-    if (!plan || !model || model->abi_version != SIM_C_ABI_VERSION ||
+    if (!plan || plan->live_inputs || !model || model->abi_version != SIM_C_ABI_VERSION ||
         model->node_count != plan->node_count || !model->evaluate ||
         !model->topology) return false;
     Topology sink = {.expected = model->topology,
@@ -456,7 +456,8 @@ static uint64_t text_hash(const CText *text)
 RsResult redstone_c_write(const RedstonePlan *plan, FILE *out,
                           const char *symbol)
 {
-    if (!plan || !out || !symbol_valid(symbol) || plan->input_count > UINT32_MAX ||
+    if (!plan || plan->live_inputs || !out || !symbol_valid(symbol) ||
+        plan->input_count > UINT32_MAX ||
         plan->node_count > (SIZE_MAX - 6)/8 ||
         plan->input_count > (SIZE_MAX - 6 - plan->node_count*8)/4)
         return RS_INVALID_ARGUMENT;

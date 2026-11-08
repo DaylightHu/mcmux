@@ -1,5 +1,6 @@
 #include "redstone_eval.h"
 
+#include <limits.h>
 #include <stdlib.h>
 
 static bool valid_state(const RedstoneState *state, RedstoneNodeId node)
@@ -20,6 +21,7 @@ RsResult redstone_state_build(const RedstonePlan *plan, RedstoneState *state)
 {
     if (!plan || !state || state->plan || state->blocks || state->node_count ||
         (plan->node_count && !plan->nodes) || plan->node_count > UINT32_MAX ||
+        (plan->external_count && (!plan->live_inputs || !plan->external_sources)) ||
         plan->node_count > SIZE_MAX/sizeof(*state->blocks))
         return RS_INVALID_ARGUMENT;
     for (size_t i = 0; i < plan->node_count; ++i) {
@@ -29,7 +31,8 @@ RsResult redstone_state_build(const RedstonePlan *plan, RedstoneState *state)
             !input_range_valid(plan, node)) return RS_INVALID_ARGUMENT;
         for (size_t j = 0; j < node.input_count; ++j) {
             RedstonePlanInput input = plan->inputs[node.first_input + j];
-            if (input.source >= plan->node_count ||
+            if ((input.source >= plan->node_count &&
+                 !redstone_plan_is_external(plan, input.source)) ||
                 input.kind > REDSTONE_INPUT_DIRECT ||
                 input.source_face > DIR_COUNT || input.attenuation > 15)
                 return RS_INVALID_ARGUMENT;
@@ -140,14 +143,34 @@ static bool native_output_supported(BlockState block)
     }
 }
 
+typedef struct {
+    const World *world;
+    int64_t dx, dy, dz;
+    bool read_external;
+} LiveInputs;
+
+static bool external_position(const RedstonePlan *plan, RedstoneNodeId source,
+                               LiveInputs *live, BlockPos *pos)
+{
+    if (!live || !redstone_plan_is_external(plan, source)) return false;
+    BlockPos original = plan->external_sources[REDSTONE_NODE_NONE - 1 - source];
+    int64_t x = original.x + live->dx, y = original.y + live->dy;
+    int64_t z = original.z + live->dz;
+    if (x < INT_MIN || x > INT_MAX || y < INT_MIN || y > INT_MAX ||
+        z < INT_MIN || z > INT_MAX) return false;
+    *pos = (BlockPos){(int)x,(int)y,(int)z};
+    live->read_external = true;
+    return true;
+}
+
 static RsResult signal_at(const RedstoneState *state, RedstoneNodeId node,
                            Direction face, SignalMode mode, bool direct,
-                           uint8_t *output)
+                           LiveInputs *live, uint8_t *output)
 {
     if (!valid_state(state, node)) return RS_INVALID_ARGUMENT;
     const RedstonePlan *plan = state->plan;
     RedstonePlanNode info = plan->nodes[node];
-    if (info.flags & REDSTONE_NODE_BOUNDARY) return RS_UNSUPPORTED;
+    if (!live && (info.flags & REDSTONE_NODE_BOUNDARY)) return RS_UNSUPPORTED;
     BlockState block = state->blocks[node];
     if (!native_output_supported(block)) return RS_UNSUPPORTED;
     if (block.id == BLOCK_REDSTONE_WIRE)
@@ -162,8 +185,16 @@ static RsResult signal_at(const RedstoneState *state, RedstoneNodeId node,
             if (input.kind != REDSTONE_INPUT_DIRECT) continue;
             if (input.source_face >= DIR_COUNT) return RS_INTERNAL_ERROR;
             uint8_t power;
-            RsResult result = signal_at(state, input.source,
-                (Direction)input.source_face, mode, true, &power);
+            RsResult result;
+            if (input.source < state->node_count) {
+                result = signal_at(state, input.source,
+                    (Direction)input.source_face, mode, true, live, &power);
+            } else {
+                BlockPos pos;
+                if (!external_position(plan, input.source, live, &pos)) return RS_UNSUPPORTED;
+                power = power_direct(live->world, pos, (Direction)input.source_face, mode);
+                result = world_result(live->world);
+            }
             if (result != RS_OK) return result;
             if (power > best) best = power;
         }
@@ -180,18 +211,30 @@ RsResult redstone_state_signal(const RedstoneState *state, RedstoneNodeId node,
         (mode != SIGNAL_ALL && mode != SIGNAL_WITHOUT_WIRE))
         return RS_INVALID_ARGUMENT;
     uint8_t power;
-    RsResult result = signal_at(state, node, face, mode, direct, &power);
+    RsResult result = signal_at(state, node, face, mode, direct, NULL, &power);
     if (result == RS_OK) *output = power;
     return result;
 }
 
 static RsResult sample_input(const RedstoneState *state, BlockId target,
-                              RedstonePlanInput input, uint8_t *output)
+                              RedstonePlanInput input, LiveInputs *live,
+                              uint8_t *output)
 {
-    if (!valid_state(state, input.source)) return RS_INTERNAL_ERROR;
-    RedstonePlanNode info = state->plan->nodes[input.source];
-    if (info.flags & REDSTONE_NODE_BOUNDARY) return RS_UNSUPPORTED;
-    BlockState source = state->blocks[input.source];
+    bool external = input.source >= state->node_count;
+    BlockPos external_pos;
+    BlockState source;
+    if (external) {
+        if (!redstone_plan_is_external(state->plan, input.source)) return RS_INTERNAL_ERROR;
+        if (!external_position(state->plan, input.source, live, &external_pos))
+            return RS_UNSUPPORTED;
+        source = world_get(live->world, external_pos);
+        RsResult result = world_result(live->world);
+        if (result != RS_OK) return result;
+    } else {
+        if (!live && (state->plan->nodes[input.source].flags & REDSTONE_NODE_BOUNDARY))
+            return RS_UNSUPPORTED;
+        source = state->blocks[input.source];
+    }
     bool diode = target == BLOCK_REDSTONE_REPEATER ||
                  target == BLOCK_REDSTONE_COMPARATOR;
     /* Analog overrides require block-entity state not owned by this backend.
@@ -209,10 +252,15 @@ static RsResult sample_input(const RedstoneState *state, BlockId target,
         power = 15;
     } else {
         if (input.source_face >= DIR_COUNT) return RS_UNSUPPORTED;
-        RsResult result = signal_at(state, input.source,
-            (Direction)input.source_face,
-            target == BLOCK_REDSTONE_WIRE ? SIGNAL_WITHOUT_WIRE : SIGNAL_ALL,
-            input.kind != REDSTONE_INPUT_DEFAULT, &power);
+        SignalMode mode = target == BLOCK_REDSTONE_WIRE ? SIGNAL_WITHOUT_WIRE : SIGNAL_ALL;
+        Direction face = (Direction)input.source_face;
+        bool direct = input.kind != REDSTONE_INPUT_DEFAULT;
+        RsResult result;
+        if (external) {
+            power = direct ? power_direct(live->world, external_pos, face, mode) :
+                             power_signal(live->world, external_pos, face, mode);
+            result = world_result(live->world);
+        } else result = signal_at(state, input.source, face, mode, direct, live, &power);
         if (result != RS_OK) return result;
     }
     *output = power > input.attenuation ?
@@ -220,13 +268,17 @@ static RsResult sample_input(const RedstoneState *state, BlockId target,
     return RS_OK;
 }
 
-RsResult redstone_evaluate(const RedstoneState *state, RedstoneNodeId node,
-                           RedstoneEvaluation *output)
+/* Specialize the ordinary evaluator with no live input reader. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+static inline RsResult evaluate(const RedstoneState *state, RedstoneNodeId node,
+                                 LiveInputs *live, RedstoneEvaluation *output)
 {
     if (!output || !valid_state(state, node)) return RS_INVALID_ARGUMENT;
     RedstonePlanNode info = state->plan->nodes[node];
-    if (info.flags & (REDSTONE_NODE_BOUNDARY | REDSTONE_NODE_RUNTIME |
-                      REDSTONE_NODE_INPUT_FALLBACK)) return RS_UNSUPPORTED;
+    if ((info.flags & (REDSTONE_NODE_RUNTIME | REDSTONE_NODE_INPUT_FALLBACK)) ||
+        (!live && (info.flags & REDSTONE_NODE_BOUNDARY))) return RS_UNSUPPORTED;
     BlockState block = state->blocks[node];
     switch ((BlockId)block.id) {
     case BLOCK_REDSTONE_WIRE:
@@ -245,7 +297,7 @@ RsResult redstone_evaluate(const RedstoneState *state, RedstoneNodeId node,
     for (size_t i = 0; i < info.input_count; ++i) {
         RedstonePlanInput input = state->plan->inputs[info.first_input + i];
         uint8_t power;
-        RsResult result = sample_input(state, (BlockId)block.id, input, &power);
+        RsResult result = sample_input(state, (BlockId)block.id, input, live, &power);
         if (result != RS_OK) return result;
         uint8_t *channel = input.kind == REDSTONE_INPUT_SIDE ?
                            &value.side : &value.input;
@@ -270,4 +322,24 @@ RsResult redstone_evaluate(const RedstoneState *state, RedstoneNodeId node,
     }
     *output = value;
     return RS_OK;
+}
+
+RsResult redstone_evaluate(const RedstoneState *state, RedstoneNodeId node,
+                           RedstoneEvaluation *output)
+{
+    return evaluate(state, node, NULL, output);
+}
+
+RsResult redstone_evaluate_live(const RedstoneState *state, RedstoneNodeId node,
+                                const World *world, BlockPos origin,
+                                RedstoneEvaluation *output, bool *read_external)
+{
+    if (!valid_state(state, node) || !state->plan->live_inputs || !world ||
+        !read_external) return RS_INVALID_ARGUMENT;
+    BlockPos min = state->plan->bounds.min;
+    LiveInputs live = {world, (int64_t)origin.x-min.x, (int64_t)origin.y-min.y,
+                       (int64_t)origin.z-min.z, false};
+    RsResult result = evaluate(state, node, &live, output);
+    *read_external = live.read_external;
+    return result;
 }

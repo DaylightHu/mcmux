@@ -446,6 +446,58 @@ static void shape_mask_tests(void)
     world_destroy(reference); world_destroy(compiled);
 }
 
+static void live_boundary_reads(void)
+{
+    World *world = world_create((WorldConfig){0});
+    REQUIRE(world && world_expand_plot(world, DIR_WEST, 1) == RS_OK);
+    const BlockPos sources[] = {{10,1,8}, {-10,1,8}};
+    const BlockPos targets[] = {{11,1,8}, {-9,1,8}};
+    BlockState repeater = block_default(BLOCK_REDSTONE_REPEATER);
+    repeater.data.repeater.facing = DIR_EAST;
+    for (size_t i = 0; i < 2; ++i) {
+        REQUIRE(world_write_visual(world, sources[i], repeater));
+        REQUIRE(world_write_visual(world, targets[i], repeater));
+    }
+    REQUIRE(sim_use_cpu(world, targets[0], targets[0]) == RS_OK);
+    REQUIRE(sim_add_cpu_instance(world, targets[0], targets[1]) == RS_OK);
+    SimCEvaluation value;
+    for (size_t i = 0; i < 2; ++i) {
+        REQUIRE(sim_executor_evaluate(world, targets[i], repeater, &value) == RS_OK);
+        REQUIRE(value.input == 0);
+    }
+    /* The source belongs to neither region. Both shared instances must
+     * read their own external state and never reuse a local-only cache. */
+    BlockState powered = repeater;
+    powered.data.repeater.powered = true;
+    REQUIRE(world_write_visual(world, sources[0], powered));
+    REQUIRE(sim_executor_evaluate(world, targets[0], repeater, &value) == RS_OK);
+    REQUIRE(value.input == 15);
+    REQUIRE(sim_executor_evaluate(world, targets[1], repeater, &value) == RS_OK);
+    REQUIRE(value.input == 0);
+    REQUIRE(world_write_visual(world, sources[0], repeater));
+    REQUIRE(sim_executor_evaluate(world, targets[0], repeater, &value) == RS_OK);
+    REQUIRE(value.input == 0);
+    REQUIRE(world_write_visual(world, sources[1], powered));
+    REQUIRE(sim_executor_evaluate(world, targets[1], repeater, &value) == RS_OK);
+    REQUIRE(value.input == 15);
+    REQUIRE(sim_stats(world).cpu_fallbacks == 0);
+    REQUIRE(world_write_visual(world, sources[0], block_default(BLOCK_AIR)));
+    REQUIRE(sim_executor_evaluate(world, targets[0], repeater, &value) == RS_UNSUPPORTED);
+    REQUIRE(sim_executor_evaluate(world, targets[1], repeater, &value) == RS_OK);
+    REQUIRE(value.input == 15);
+    REQUIRE(world_expand_plot(world, DIR_EAST, 1) == RS_OK);
+    REQUIRE(!sim_cpu_active(world));
+    REQUIRE(sim_executor_evaluate(world, targets[1], repeater, &value) == RS_UNSUPPORTED);
+
+    BlockState comparator = block_default(BLOCK_REDSTONE_COMPARATOR);
+    comparator.data.comparator.facing = DIR_EAST;
+    REQUIRE(world_write_visual(world, sources[0], block_default(BLOCK_BARREL)));
+    REQUIRE(world_write_visual(world, targets[0], comparator));
+    REQUIRE(sim_use_cpu(world, targets[0], targets[0]) == RS_OK);
+    REQUIRE(sim_executor_evaluate(world, targets[0], comparator, &value) == RS_UNSUPPORTED);
+    world_destroy(world);
+}
+
 static World *pair_fixture(void)
 {
     World *world = fixture();
@@ -708,7 +760,7 @@ static void late_region_tests(void)
     world_destroy(reference); world_destroy(compiled);
 }
 
-static void live_tests(const SimCModel *model, BlockPos min, bool fallback)
+static void live_tests(const SimCModel *model, BlockPos min, bool boundary)
 {
     static const BlockPos INPUTS[] = {{8,1,8}, {9,1,6}, {8,1,16}, {10,1,14}};
     World *reference = fixture(), *compiled = fixture();
@@ -740,7 +792,8 @@ static void live_tests(const SimCModel *model, BlockPos min, bool fallback)
     }
     SimStats stats = sim_stats(compiled);
     REQUIRE(stats.c_evaluations > 0);
-    REQUIRE(fallback ? stats.cpu_fallbacks > 0 : stats.cpu_fallbacks == 0);
+    REQUIRE(stats.cpu_fallbacks == 0);
+    if (boundary) REQUIRE(stats.cpu_evaluations > stats.c_evaluations);
     world_remove(compiled, (BlockPos){10,1,8});
     REQUIRE(!sim_c_active(compiled));
     sim_advance_ticks(compiled, 4);
@@ -934,6 +987,7 @@ int main(int argc, char **argv)
     instance_attachment_tests();
     notification_tests();
     shape_mask_tests();
+    live_boundary_reads();
     late_region_tests();
     puts("generated C tests: PASS (queries, ordered writes, pending events, switching, fallback, invalidation)");
     return 0;
