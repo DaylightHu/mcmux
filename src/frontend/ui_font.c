@@ -1,4 +1,5 @@
 #include "ui_font.h"
+#include "gui.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -16,7 +17,7 @@ static Font font_for_size(int size)
     int index = size > 0 && size < FONT_CACHE_SIZE ? size : FALLBACK_SIZE;
     if (!attempted[index]) {
         attempted[index] = true;
-        Font font = LoadFontEx(font_path, index, NULL, 0);
+        Font font = LoadFontEx(gui_asset_path(font_path), index, NULL, 0);
         if (font.texture.id && font.texture.id != GetFontDefault().texture.id) {
             fonts[index] = font;
             SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);

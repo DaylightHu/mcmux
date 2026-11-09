@@ -21,6 +21,8 @@
 #define RAYLIB_DIR "third_party/raylib"
 #define RAYLIB_SRC RAYLIB_DIR "/src"
 #define RAYLIB_CONFIG "raylib_config.h"
+#define MAC_APP "build/macos/mcmux.app"
+#define MAC_APP_BINARY MAC_APP "/Contents/MacOS/machinecraft_gui"
 
 static const char *common_sources[] = {
     "src/mcmux.c",
@@ -590,6 +592,59 @@ static bool link_target(const char *output, const Files *objects)
     return nob_cmd_run(&command);
 }
 
+#if defined(__APPLE__)
+static bool copy_if_newer(const char *source, const char *destination)
+{
+    int rebuild = nob_needs_rebuild1(destination, source);
+    if (rebuild <= 0) return rebuild == 0;
+    const char *temporary = nob_temp_sprintf("%s.tmp", destination);
+    return nob_copy_file(source, temporary) && nob_rename(temporary, destination);
+}
+
+static bool package_mac_gui(const char *binary)
+{
+    if (!nob_mkdir_if_not_exists(MAC_APP) ||
+        !nob_mkdir_if_not_exists(MAC_APP "/Contents") ||
+        !nob_mkdir_if_not_exists(MAC_APP "/Contents/MacOS") ||
+        !nob_mkdir_if_not_exists(MAC_APP "/Contents/Resources")) return false;
+
+    if (!copy_if_newer(binary, MAC_APP_BINARY) ||
+        !copy_if_newer("packaging/macos/Info.plist", MAC_APP "/Contents/Info.plist") ||
+        !copy_if_newer("packaging/macos/mcmux.icns", MAC_APP "/Contents/Resources/mcmux.icns"))
+        return false;
+
+    Nob_Cmd copy = {0};
+    nob_cmd_append(&copy, "ditto", "res", MAC_APP "/Contents/Resources/res");
+    return nob_cmd_run(&copy);
+}
+#elif defined(_WIN32)
+static bool compile_gui_icon(Files *objects)
+{
+    const char *output = "build/windows/obj/mcmux_icon.o";
+    const char *inputs[] = {"packaging/windows/mcmux.rc", "packaging/windows/mcmux.ico"};
+    int rebuild = nob_needs_rebuild(output, inputs, NOB_ARRAY_LEN(inputs));
+    if (rebuild < 0) return false;
+    if (rebuild > 0) {
+        const char *tool = getenv("WINDRES");
+        if (!tool || !*tool) {
+            if (SearchPathA(NULL, "llvm-windres", ".exe", 0, NULL, NULL)) tool = "llvm-windres";
+            else if (SearchPathA(NULL, "windres", ".exe", 0, NULL, NULL)) tool = "windres";
+            else {
+                nob_log(NOB_ERROR, "Install llvm-windres or windres, or set WINDRES to its path");
+                return false;
+            }
+        }
+        const char *temporary = "build/windows/obj/mcmux_icon.tmp.o";
+        Nob_Cmd compile = {0};
+        nob_cmd_append(&compile, tool, "-I", "packaging/windows", "-i", inputs[0],
+                       "-O", "coff", "-o", temporary);
+        if (!nob_cmd_run(&compile) || !nob_rename(temporary, output)) return false;
+    }
+    files_add(objects, output);
+    return true;
+}
+#endif
+
 static bool compile_sources(const char **sources, size_t source_count,
                             const Files *headers, Files *objects)
 {
@@ -626,9 +681,15 @@ static bool build_machinecraft(void)
     files_append(&link_objects, &common_objects);
     files_append(&link_objects, &gui_objects);
     files_append(&link_objects, &raylib_objects);
+#if defined(_WIN32)
+    if (!compile_gui_icon(&link_objects)) goto cleanup;
+#endif
     const char *output = nob_temp_sprintf("%s/machinecraft_gui%s",
                                           platform_build_dir(), executable_suffix());
     if (!link_target(output, &link_objects)) goto cleanup;
+#if defined(__APPLE__)
+    if (!package_mac_gui(output)) goto cleanup;
+#endif
 
     result = true;
 
@@ -1171,8 +1232,12 @@ int main(int argc, char **argv)
     if (strcmp(command, "run") == 0) {
         if (!build_machinecraft()) return 1;
         Nob_Cmd run = {0};
+#if defined(__APPLE__)
+        const char *binary = MAC_APP_BINARY;
+#else
         const char *binary = nob_temp_sprintf("%s/machinecraft_gui%s",
                                               platform_build_dir(), executable_suffix());
+#endif
         nob_cmd_append(&run, binary);
         return nob_cmd_run(&run) ? 0 : 1;
     }

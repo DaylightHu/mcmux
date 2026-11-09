@@ -6,4 +6,7 @@
 /* The host retains the manager after this frontend detaches or returns. */
 int gui_run(WorldSessionManager *world_sessions);
 
+/* Resolve a relative resource path for one immediate load on the GUI thread. */
+const char *gui_asset_path(const char *relative);
+
 #endif
