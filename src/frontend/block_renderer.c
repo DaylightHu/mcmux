@@ -1,4 +1,5 @@
 #include "block_renderer.h"
+#include "gui.h"
 #include "rlgl.h"
 #include "external/glad.h"
 #include "hopper_shape.h"
@@ -130,7 +131,7 @@ typedef struct {
 
 static Image load_tile(const char *path)
 {
-    Image image = LoadImage(path);
+    Image image = LoadImage(gui_asset_path(path));
     if (!image.data) {
         TraceLog(LOG_ERROR, "BLOCK TEXTURE: Cannot load %s", path);
         return (Image){0};

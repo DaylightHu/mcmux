@@ -1,4 +1,5 @@
 #include "gui_view.h"
+#include "gui.h"
 #include "inventory.h"
 #include "ui_font.h"
 
@@ -106,7 +107,7 @@ bool inventory_init(Inventory *inventory)
 
     for (size_t index = 0; index < count; ++index) {
         BlockTexture item = block_textures[index];
-        Texture2D texture = LoadTexture(item.path);
+        Texture2D texture = LoadTexture(gui_asset_path(item.path));
         if (!texture.id) {
             TraceLog(LOG_ERROR, "INVENTORY: Cannot load %s", item.path);
             inventory_unload(inventory);
@@ -118,7 +119,7 @@ bool inventory_init(Inventory *inventory)
             .kind = INVENTORY_BLOCK, .block = item.id
         };
     }
-    Image potato = LoadImage("res/textures/item/poisonous_potato.png");
+    Image potato = LoadImage(gui_asset_path("res/textures/item/poisonous_potato.png"));
     if (!potato.data) {
         inventory_unload(inventory);
         return false;
@@ -137,7 +138,7 @@ bool inventory_init(Inventory *inventory)
         .stack = {ITEM_POISONOUS_POTATO, 1,
                   item_stack_limit(ITEM_POISONOUS_POTATO)}
     };
-    Image axe = LoadImage("res/textures/item/wooden_axe.png");
+    Image axe = LoadImage(gui_asset_path("res/textures/item/wooden_axe.png"));
     if (!axe.data) { inventory_unload(inventory); return false; }
     ImageAlphaCrop(&axe, 0.0f);
     texture = LoadTextureFromImage(axe);

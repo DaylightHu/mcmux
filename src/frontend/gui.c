@@ -1841,7 +1841,7 @@ static bool initialize(GuiApp *app, WorldSessionManager *world_sessions)
     SetExitKey(KEY_NULL);
     SetTargetFPS(60);
     if (!ui_font_init()) return false;
-    app->title_background = LoadTexture("res/gui/title_background.png");
+    app->title_background = LoadTexture(gui_asset_path("res/gui/title_background.png"));
     if (!app->title_background.id) {
         fprintf(stderr, "Cannot load title background; run from the project root\n");
         return false;
