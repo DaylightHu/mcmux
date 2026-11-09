@@ -2656,8 +2656,13 @@ bool workspace_editor_pointer(WorkspaceEditor *editor, Rectangle box,
         if (editor->entry_count) {
             scroll_index(&editor->selected, -y, editor->entry_count - 1);
             if (pointer.pressed && inside) {
-                size_t index = editor->browser_top + (size_t)((pointer.position.y - view.body_top)/EDITOR_ROW_HEIGHT);
-                if (index < editor->entry_count) editor->selected = index;
+                size_t row = (size_t)((pointer.position.y - view.body_top)/EDITOR_ROW_HEIGHT);
+                size_t index = editor->browser_top + row;
+                if (row < (size_t)view.rows && index < editor->entry_count) {
+                    editor->selected = index;
+                    browser_enter(editor);
+                    editor->follow_cursor = true;
+                }
             }
         }
         return false;
