@@ -26,6 +26,8 @@ bool workspace_output_is_program_running(const WorkspaceOutput *output);
 void workspace_output_poll(WorkspaceOutput *output);
 void workspace_output_cancel(WorkspaceOutput *output);
 void workspace_output_update(WorkspaceOutput *output);
+/* Routed by the workspace to the hovered output pane, independently of focus. */
+void workspace_output_scroll(WorkspaceOutput *output, Vector2 wheel);
 void workspace_output_draw(WorkspaceOutput *output, Rectangle box, int pane,
                             bool focused, bool zoomed);
 

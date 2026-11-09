@@ -1102,49 +1102,43 @@ static bool prepare_module_baseline(const char *requested)
 /* The benchmark owns the AOT workflow; no separate benchmark command is needed.
  * Compiler arguments are passed directly, never through a shell. Generated
  * headers live in build/ and are regenerated on every run. */
-static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
+static bool run_benchmark(int argc, char **argv)
 {
     bool info_only = false;
     bool compare_modules = false;
     const char *baseline = NULL;
-    if (benchmark) {
-        int count = 0;
-        for (int i = 0; i < argc; ++i) {
-            if (!strcmp(argv[i], "--compare-modules")) compare_modules = true;
-            else if (!strcmp(argv[i], "--baseline")) {
-                if (i + 1 == argc || !argv[i + 1][0]) {
-                    nob_log(NOB_ERROR, "--baseline requires a Git commit or ref");
-                    return false;
-                }
-                baseline = argv[++i];
+    int count = 0;
+    for (int i = 0; i < argc; ++i) {
+        if (!strcmp(argv[i], "--compare-modules")) compare_modules = true;
+        else if (!strcmp(argv[i], "--baseline")) {
+            if (i + 1 == argc || !argv[i + 1][0]) {
+                nob_log(NOB_ERROR, "--baseline requires a Git commit or ref");
+                return false;
             }
-            else argv[count++] = argv[i];
+            baseline = argv[++i];
         }
-        argc = count;
+        else argv[count++] = argv[i];
     }
+    argc = count;
     if (baseline && !compare_modules) {
         nob_log(NOB_ERROR, "--baseline requires --compare-modules");
         return false;
     }
-    if (benchmark) {
-        for (int i = 0; i < argc; ++i) {
-            if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h") ||
-                !strcmp(argv[i], "--list-scenarios"))
-                info_only = true;
-            if (!strcmp(argv[i], "--emit-c")) {
-                nob_log(NOB_ERROR, "benchmark manages --emit-c itself");
-                return false;
-            }
+    for (int i = 0; i < argc; ++i) {
+        if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h") ||
+            !strcmp(argv[i], "--list-scenarios"))
+            info_only = true;
+        if (!strcmp(argv[i], "--emit-c")) {
+            nob_log(NOB_ERROR, "benchmark manages --emit-c itself");
+            return false;
         }
     }
     const char *source = compare_modules ? "benchmarks/module_comparison.c" :
-                         benchmark ? "benchmarks/redstone_scaling.c" : "tests/c_codegen_test.c";
+                                          "benchmarks/redstone_scaling.c";
     const char *generator = compare_modules ? "module_comparison_generator" :
-                            benchmark ? "redstone_scaling_generator" : "c_codegen_generator";
-    const char *binary = compare_modules ? "module_comparison" :
-                         benchmark ? "redstone_scaling" : "c_codegen_test";
-    const char *header = benchmark ? "build/benchmark-models.h" : "build/test-c-models.h";
-    const char *define = benchmark ? "-DMCMUX_BENCHMARK_C" : "-DMCMUX_TEST_C";
+                                             "redstone_scaling_generator";
+    const char *binary = compare_modules ? "module_comparison" : "redstone_scaling";
+    const char *header = "build/benchmark-models.h";
     if (!build_headless_tool(source, generator, false)) return false;
     Nob_Cmd command = {0};
     nob_cmd_append(&command, nob_temp_sprintf("build/%s%s", generator, executable_suffix()));
@@ -1154,13 +1148,12 @@ static bool run_generated_c_tool(bool benchmark, int argc, char **argv)
     if (!nob_cmd_run(&command)) return false;
     if (compare_modules && !prepare_module_baseline(baseline ? baseline : "HEAD")) return false;
     uint64_t start = nob_nanos_since_unspecified_epoch();
-    if (!build_headless_tool_flags(source, binary, false, define)) return false;
+    if (!build_headless_tool_flags(source, binary, false, "-DMCMUX_BENCHMARK_C")) return false;
     double seconds = (double)(nob_nanos_since_unspecified_epoch() - start)/1e9;
     nob_log(NOB_INFO, "AOT compile and link: %.3f s", seconds);
     nob_cmd_append(&command, nob_temp_sprintf("build/%s%s", binary, executable_suffix()));
     for (int i = 0; i < argc; ++i) nob_cmd_append(&command, argv[i]);
-    if (benchmark)
-        nob_cmd_append(&command, "--c-build-seconds", nob_temp_sprintf("%.9f", seconds));
+    nob_cmd_append(&command, "--c-build-seconds", nob_temp_sprintf("%.9f", seconds));
     return nob_cmd_run(&command);
 }
 
@@ -1173,12 +1166,10 @@ static void print_help(const char *program)
     printf("  run          Build and run the GUI from the repository root\n");
     printf("  vendor-list  Print the raylib files required by macOS and Windows\n");
     printf("  precommit    Stage the exact raylib set and verify an index-only build\n");
-    printf("  test         Build and run the structure persistence tests\n");
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
     printf("  benchmark    Generate C queries, compile and run the full redstone suite\n");
     printf("               --compare-modules: one-command baseline/current module comparison\n");
     printf("               --baseline REF: comparison baseline (default: HEAD)\n");
-    printf("  test-c       Generate, compile and test the C query backend\n");
     printf("  export-c     Export INPUT.mcs OUTPUT.c [SYMBOL] as C query code\n");
     printf("  lib          Build build/libmcmux.a (no GUI dependencies)\n");
     printf("  build-c FILE Build a user C program linked with the simulation core\n");
@@ -1194,16 +1185,10 @@ int main(int argc, char **argv)
     const char *program = nob_shift(argv, argc);
     const char *command = argc > 0 ? nob_shift(argv, argc) : "build";
 
-    if (strcmp(command,"test")==0)
-        return build_headless_tool("tests/structure_test.c","structure_test",true) ? 0 : 1;
     if (strcmp(command,"reader")==0)
         return build_headless_tool("tools/inspect_structure.c","inspect_structure",false) ? 0 : 1;
     if (strcmp(command,"benchmark")==0)
-        return run_generated_c_tool(true, argc, argv) ? 0 : 1;
-    if (strcmp(command,"test-c")==0) {
-        if (argc) return 1;
-        return run_generated_c_tool(false, 0, NULL) ? 0 : 1;
-    }
+        return run_benchmark(argc, argv) ? 0 : 1;
     if (strcmp(command,"export-c")==0) {
         if (argc != 2 && argc != 3) {
             nob_log(NOB_ERROR, "usage: %s export-c INPUT.mcs OUTPUT.c [SYMBOL]", program);

@@ -123,6 +123,10 @@ struct WorkspaceEditor {
     size_t jump_count;
     uint64_t code_hash;
     bool code_pending;
+    bool follow_cursor, pointer_down, pointer_selecting, pointer_insert;
+    Vector2 pointer_origin, wheel_remainder;
+    size_t pointer_row, pointer_column;
+    double pointer_scroll_time;
 };
 
 static void enter_command_mode(WorkspaceEditor *editor, EditorMode return_mode);
@@ -1930,6 +1934,7 @@ static void receive_code(void *source,const WorkspaceCodeReply *reply)
     buffer->column=reply->column;
     buffer->top=buffer->row>5 ? buffer->row-5 : 0; buffer->left=0;
     clamp_cursor(buffer,false); remember_column(buffer);
+    editor->follow_cursor=true;
     editor->messages_visible=false;
 }
 
@@ -2191,7 +2196,7 @@ static void update_normal(WorkspaceEditor *editor)
             break;
         }
     }
-    if (interacted) editor->messages_visible = false;
+    if (interacted) { editor->messages_visible = false; editor->follow_cursor = true; }
 }
 
 static void update_insert(WorkspaceEditor *editor)
@@ -2390,9 +2395,6 @@ static void update_browser(WorkspaceEditor *editor)
         if (editor->selected >= editor->entry_count)
             editor->selected = editor->entry_count - 1;
     }
-    float wheel = GetMouseWheelMove();
-    if (wheel > 0 && editor->selected) --editor->selected;
-    if (wheel < 0 && editor->selected + 1 < editor->entry_count) ++editor->selected;
     if (IsKeyPressed(KEY_H)) {
         char parent[EDITOR_PATH_CAPACITY];
         if (path_parent(editor->cwd, parent)) (void)browser_open(editor, parent);
@@ -2424,6 +2426,7 @@ WorkspaceEditor *workspace_editor_create(void)
     editor->buffers[0] = buffer;
     editor->buffer_count = 1;
     editor->mode = EDITOR_NORMAL;
+    editor->follow_cursor = true;
     return editor;
 }
 
@@ -2485,11 +2488,24 @@ WorkspaceEditorAction workspace_editor_update(WorkspaceEditor *editor,
         while (GetCharPressed()!=0) {}
         return action;
     }
+    EditorBuffer *before = current_buffer(editor);
+    size_t row = before ? before->row : 0, column = before ? before->column : 0;
+    size_t bytes = before ? before->bytes : 0;
+    EditorMode mode = editor->mode;
     if (editor->mode == EDITOR_INSERT) update_insert(editor);
     else if (editor->mode == EDITOR_COMMAND)
         action = update_command_mode(editor, prepare_run, context);
     else if (editor->mode == EDITOR_BROWSER) update_browser(editor);
     else update_normal(editor);
+    if (editor->pointer_insert && (mode == EDITOR_VISUAL || mode == EDITOR_VISUAL_LINE) &&
+        editor->mode == EDITOR_NORMAL) {
+        editor->mode = EDITOR_INSERT;
+        editor->pointer_insert = false;
+    }
+    EditorBuffer *after = current_buffer(editor);
+    if (before != after || mode != editor->mode || (after &&
+        (row != after->row || column != after->column || bytes != after->bytes)))
+        editor->follow_cursor = true;
     return action;
 }
 
@@ -2541,6 +2557,162 @@ static int visible_message_rows(const WorkspaceEditor *editor, int available)
     if (rows > 5) rows = 5;
     if (rows > available/3) rows = available/3;
     return rows;
+}
+
+/* One geometry calculation for painting and pointer hit testing. */
+typedef struct {
+    Rectangle box;
+    int cell_width, text_x, body_top, body_bottom, rows, columns;
+    int status_y, message_rows;
+} EditorView;
+
+static EditorView editor_view(const WorkspaceEditor *editor, Rectangle box)
+{
+    EditorView view = {.box = box};
+    view.cell_width = ui_text_width("M", EDITOR_FONT_SIZE);
+    if (view.cell_width < 1) view.cell_width = 1;
+    view.status_y = (int)(box.y + box.height) - EDITOR_STATUS_HEIGHT;
+    int available = (view.status_y - (int)box.y - EDITOR_HEADER_HEIGHT)/EDITOR_ROW_HEIGHT;
+    view.message_rows = visible_message_rows(editor, available);
+    view.body_top = (int)box.y + EDITOR_HEADER_HEIGHT + 3;
+    view.body_bottom = view.status_y - view.message_rows*EDITOR_ROW_HEIGHT - 2;
+    view.rows = (view.body_bottom - view.body_top)/EDITOR_ROW_HEIGHT;
+    if (view.rows < 0) view.rows = 0;
+    const EditorBuffer *buffer = current_buffer_const(editor);
+    size_t digits = decimal_digits(buffer ? buffer->line_count : 1);
+    view.text_x = (int)box.x + 6 + ((int)digits + 2)*view.cell_width;
+    view.columns = ((int)(box.x + box.width) - view.text_x - 6)/view.cell_width;
+    if (view.columns < 1) view.columns = 1;
+    return view;
+}
+
+static void scroll_index(size_t *value, int delta, size_t maximum)
+{
+    if (delta < 0) *value = *value > (size_t)-delta ? *value - (size_t)-delta : 0;
+    else if ((size_t)delta > maximum || *value > maximum - (size_t)delta) *value = maximum;
+    else *value += (size_t)delta;
+    if (*value > maximum) *value = maximum;
+}
+
+static size_t visual_offset(const EditorLine *line, size_t column)
+{
+    size_t display = 0;
+    for (size_t offset = 0; offset < line->length; offset = utf8_next(line, offset)) {
+        size_t width = line->text[offset] == '\t' ? EDITOR_TAB_WIDTH - display%EDITOR_TAB_WIDTH : 1;
+        if (column < display + width) return offset;
+        display += width;
+    }
+    return line->length;
+}
+
+static void pointer_position(EditorBuffer *buffer, EditorView view, Vector2 point,
+                               bool insertion)
+{
+    int row = ((int)point.y - view.body_top)/EDITOR_ROW_HEIGHT;
+    int column = ((int)point.x - view.text_x)/view.cell_width;
+    if (row < 0) row = 0;
+    if (row >= view.rows) row = view.rows - 1;
+    if (column < 0) column = 0;
+    if (column >= view.columns) column = view.columns - 1;
+    buffer->row = buffer->top + (size_t)row;
+    if (buffer->row >= buffer->line_count) buffer->row = buffer->line_count - 1;
+    buffer->column = visual_offset(&buffer->lines[buffer->row], buffer->left + (size_t)column);
+    clamp_cursor(buffer, insertion);
+    remember_column(buffer);
+}
+
+void workspace_editor_cancel_pointer(WorkspaceEditor *editor)
+{
+    if (!editor) return;
+    editor->pointer_down = editor->pointer_selecting = false;
+}
+
+bool workspace_editor_pointer(WorkspaceEditor *editor, Rectangle box,
+                              WorkspaceEditorPointer pointer)
+{
+    if (!editor) return false;
+    EditorView view = editor_view(editor, box);
+    EditorBuffer *buffer = current_buffer(editor);
+    if (!buffer || view.rows < 1) {
+        workspace_editor_cancel_pointer(editor);
+        return false;
+    }
+    bool inside = pointer.position.x >= box.x && pointer.position.x < box.x + box.width &&
+                  pointer.position.y >= view.body_top && pointer.position.y < view.body_bottom;
+    editor->wheel_remainder.x += pointer.wheel.x*3;
+    editor->wheel_remainder.y += pointer.wheel.y*3;
+    int x = (int)editor->wheel_remainder.x, y = (int)editor->wheel_remainder.y;
+    editor->wheel_remainder.x -= x; editor->wheel_remainder.y -= y;
+    if (editor->code_info) {
+        if (pointer.pressed) close_code_info(editor);
+        else {
+            scroll_index(&editor->code_info->top, -y, editor->code_info->line_count - 1);
+            scroll_index(&editor->code_info->left, -x, EDITOR_DRAW_CAPACITY);
+        }
+        return false;
+    }
+    if (editor->mode == EDITOR_COMMAND) return false;
+    if (editor->mode == EDITOR_BROWSER) {
+        if (editor->entry_count) {
+            scroll_index(&editor->selected, -y, editor->entry_count - 1);
+            if (pointer.pressed && inside) {
+                size_t row = (size_t)((pointer.position.y - view.body_top)/EDITOR_ROW_HEIGHT);
+                size_t index = editor->browser_top + row;
+                if (row < (size_t)view.rows && index < editor->entry_count) {
+                    editor->selected = index;
+                    browser_enter(editor);
+                    editor->follow_cursor = true;
+                }
+            }
+        }
+        return false;
+    }
+    size_t last_top = buffer->line_count > (size_t)view.rows ? buffer->line_count - (size_t)view.rows : 0;
+    if (x || y) {
+        scroll_index(&buffer->top, -y, last_top);
+        scroll_index(&buffer->left, -x, EDITOR_DRAW_CAPACITY);
+        editor->follow_cursor = false;
+    }
+    if (pointer.pressed && inside) {
+        bool insertion = editor->mode == EDITOR_INSERT || editor->pointer_insert;
+        editor->mode = insertion ? EDITOR_INSERT : EDITOR_NORMAL;
+        editor->pointer_insert = false;
+        editor->pending_operator = 0;
+        pointer_position(buffer, view, pointer.position, insertion);
+        editor->pointer_row = buffer->row; editor->pointer_column = buffer->column;
+        editor->pointer_origin = pointer.position;
+        editor->pointer_down = true; editor->pointer_selecting = false;
+        editor->pointer_insert = insertion;
+        editor->pointer_scroll_time = pointer.time;
+        editor->follow_cursor = true;
+    } else if (editor->pointer_down && (pointer.down || pointer.released)) {
+        float dx = pointer.position.x - editor->pointer_origin.x;
+        float dy = pointer.position.y - editor->pointer_origin.y;
+        if (!editor->pointer_selecting && dx*dx + dy*dy >= 9) {
+            editor->pointer_selecting = true;
+            editor->mode = EDITOR_VISUAL;
+            editor->selection_row = editor->pointer_row;
+            editor->selection_column = editor->pointer_column;
+        }
+        if (editor->pointer_selecting) {
+            if (pointer.down && pointer.time >= editor->pointer_scroll_time) {
+                int vertical = pointer.position.y < view.body_top ? -1 :
+                    pointer.position.y >= view.body_bottom ? 1 : 0;
+                int horizontal = pointer.position.x < view.text_x ? -1 :
+                    pointer.position.x >= box.x + box.width ? 1 : 0;
+                scroll_index(&buffer->top, vertical, last_top);
+                scroll_index(&buffer->left, horizontal, EDITOR_DRAW_CAPACITY);
+                editor->pointer_scroll_time = pointer.time + 0.04;
+            }
+            pointer_position(buffer, view, pointer.position, false);
+            editor->follow_cursor = false;
+        }
+    }
+    if (pointer.released || !pointer.down) {
+        editor->pointer_down = false;
+        if (!editor->pointer_selecting) editor->pointer_insert = false;
+    }
+    return editor->pointer_down;
 }
 
 static void draw_messages(const WorkspaceEditor *editor, Rectangle box,
@@ -2595,27 +2767,27 @@ static void draw_browser(WorkspaceEditor *editor, Rectangle box,
     }
 }
 
-static void draw_buffer(WorkspaceEditor *editor, Rectangle box,
-                        int body_top, int body_bottom, int cell_width,
-                        bool focused)
+static void draw_buffer(WorkspaceEditor *editor, EditorView view, bool focused)
 {
     EditorBuffer *buffer = current_buffer(editor);
     if (!buffer) return;
-    int rows = (body_bottom - body_top)/EDITOR_ROW_HEIGHT;
+    Rectangle box = view.box;
+    int rows = view.rows, columns = view.columns, cell_width = view.cell_width;
+    int body_top = view.body_top, text_x = view.text_x;
     if (rows < 1) return;
     size_t digits = decimal_digits(buffer->line_count);
-    int gutter_columns = (int)digits + 2;
-    int text_x = (int)box.x + 6 + gutter_columns*cell_width;
-    int columns = ((int)(box.x + box.width) - text_x - 6)/cell_width;
-    if (columns < 1) columns = 1;
-    if (buffer->row < buffer->top) buffer->top = buffer->row;
-    if (buffer->row >= buffer->top + (size_t)rows)
-        buffer->top = buffer->row - (size_t)rows + 1;
+    if (buffer->top >= buffer->line_count) buffer->top = buffer->line_count - 1;
     EditorLine *cursor_line = &buffer->lines[buffer->row];
     size_t cursor_visual = visual_column(cursor_line, buffer->column);
-    if (cursor_visual < buffer->left) buffer->left = cursor_visual;
-    if (cursor_visual >= buffer->left + (size_t)columns)
-        buffer->left = cursor_visual - (size_t)columns + 1;
+    if (editor->follow_cursor) {
+        if (buffer->row < buffer->top) buffer->top = buffer->row;
+        if (buffer->row >= buffer->top + (size_t)rows)
+            buffer->top = buffer->row - (size_t)rows + 1;
+        if (cursor_visual < buffer->left) buffer->left = cursor_visual;
+        if (cursor_visual >= buffer->left + (size_t)columns)
+            buffer->left = cursor_visual - (size_t)columns + 1;
+        editor->follow_cursor = false;
+    }
     for (int row = 0; row < rows; ++row) {
         size_t index = buffer->top + (size_t)row;
         if (index >= buffer->line_count) break;
@@ -2647,7 +2819,9 @@ static void draw_buffer(WorkspaceEditor *editor, Rectangle box,
         ui_text_draw(visible, text_x, y + 2, EDITOR_FONT_SIZE,
                      (Color){211, 222, 231, 255});
     }
-    if (focused && (editor->mode == EDITOR_NORMAL || editor->mode == EDITOR_INSERT || visual_mode(editor))) {
+    if (focused && buffer->row >= buffer->top && buffer->row < buffer->top + (size_t)rows &&
+        cursor_visual >= buffer->left && cursor_visual < buffer->left + (size_t)columns &&
+        (editor->mode == EDITOR_NORMAL || editor->mode == EDITOR_INSERT || visual_mode(editor))) {
         int screen_row = (int)(buffer->row - buffer->top);
         int cursor_x = text_x + (int)(cursor_visual - buffer->left)*cell_width;
         int cursor_y = body_top + screen_row*EDITOR_ROW_HEIGHT + 2;
@@ -2708,8 +2882,8 @@ void workspace_editor_draw(WorkspaceEditor *editor, Rectangle box, int pane,
                            bool focused, bool zoomed)
 {
     if (!editor || box.width < 2 || box.height < 2) return;
-    int cell_width = ui_text_width("M", EDITOR_FONT_SIZE);
-    if (cell_width < 1) cell_width = 1;
+    EditorView view = editor_view(editor, box);
+    int cell_width = view.cell_width;
     Color accent = focused ? (Color){172, 143, 255, 255} :
                              (Color){79, 89, 99, 255};
     DrawRectangleRec(box, (Color){30, 30, 30, 255});
@@ -2726,17 +2900,11 @@ void workspace_editor_draw(WorkspaceEditor *editor, Rectangle box, int pane,
              zoomed ? " [zoom]" : "", focused ? " *" : "");
     ui_text_draw(title, (int)box.x + 8, (int)box.y + 5,
                  EDITOR_HEADER_FONT_SIZE, accent);
-    int status_y = (int)(box.y + box.height) - EDITOR_STATUS_HEIGHT;
-    int available_rows = (status_y - (int)box.y - EDITOR_HEADER_HEIGHT)/
-                         EDITOR_ROW_HEIGHT;
-    int message_rows = visible_message_rows(editor, available_rows);
-    int message_top = status_y - message_rows*EDITOR_ROW_HEIGHT;
-    int body_top = (int)box.y + EDITOR_HEADER_HEIGHT + 3;
-    int body_bottom = message_top - 2;
+    int status_y = view.status_y, message_rows = view.message_rows;
     if (editor->mode == EDITOR_BROWSER)
-        draw_browser(editor, box, body_top, body_bottom, cell_width);
+        draw_browser(editor, box, view.body_top, view.body_bottom, cell_width);
     else
-        draw_buffer(editor, box, body_top, body_bottom, cell_width, focused);
+        draw_buffer(editor, view, focused);
     draw_messages(editor, box, status_y, message_rows);
     DrawRectangle((int)box.x, status_y, (int)box.width,
                   EDITOR_STATUS_HEIGHT, (Color){44, 38, 63, 255});

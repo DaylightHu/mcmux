@@ -256,3 +256,64 @@ void workspace_layout_show_gui(WorkspaceLayout *layout)
     layout->gui_visible = true;
     layout->focus = 0;
 }
+
+static int divider_at(const WorkspaceLayout *layout, int node, WorkspaceRect box,
+                       int x, int y)
+{
+    const WorkspaceNode *n = &layout->nodes[node];
+    if (n->first < 0 || x < box.x || y < box.y ||
+        x >= box.x + box.width || y >= box.y + box.height) return -1;
+    WorkspaceRect a, b;
+    child_rects(layout, node, box, &a, &b);
+    int edge = n->split_x ? b.x : b.y;
+    int point = n->split_x ? x : y;
+    if (point >= edge - WORKSPACE_DIVIDER - 2 && point < edge + 2) return node;
+    int found = divider_at(layout, n->first, a, x, y);
+    return found >= 0 ? found : divider_at(layout, n->second, b, x, y);
+}
+
+int workspace_layout_divider_at(const WorkspaceLayout *layout, int width, int height,
+                                int x, int y)
+{
+    if (x < 0 || y < 0 || x >= width || y >= height || layout->root < 0) return -1;
+    WorkspaceGeometry geometry;
+    workspace_layout_geometry(layout, width, height, &geometry);
+    if (layout->gui_visible && x >= geometry.text.x - WORKSPACE_DIVIDER - 2 &&
+        x < geometry.text.x + 2) return -2;
+    if (layout->zoom > 0 || geometry.compact) return -1;
+    return divider_at(layout, layout->root, geometry.text, x, y);
+}
+
+bool workspace_layout_drag_divider(WorkspaceLayout *layout, int divider,
+                                   int position, int width, int height)
+{
+    if (layout->root < 0) return false;
+    WorkspaceGeometry geometry;
+    workspace_layout_geometry(layout, width, height, &geometry);
+    if (divider == -2) {
+        if (!layout->gui_visible) return false;
+        int high = width - WORKSPACE_DIVIDER - minimum(layout, layout->root, true);
+        int low = 640;
+        if (high < low) return false;
+        int next = larger(low, smaller(high, position));
+        if (layout->gui_width == next) return false;
+        layout->gui_width = next;
+        return true;
+    }
+    if (divider < 0 || divider >= WORKSPACE_NODE_LIMIT || layout->zoom > 0 ||
+        geometry.compact || !layout->nodes[divider].used ||
+        layout->nodes[divider].first < 0) return false;
+    WorkspaceRect box;
+    if (!find_rect(layout, layout->root, divider, geometry.text, &box)) return false;
+    WorkspaceNode *n = &layout->nodes[divider];
+    int total = (n->split_x ? box.width : box.height) - WORKSPACE_DIVIDER;
+    int low = minimum(layout, n->first, n->split_x);
+    int high = total - minimum(layout, n->second, n->split_x);
+    if (high < low || total <= 0) return false;
+    int length = position - (n->split_x ? box.x : box.y);
+    length = larger(low, smaller(high, length));
+    int ratio = (int)(((int64_t)length*10000 + total/2)/total);
+    if (n->ratio == ratio) return false;
+    n->ratio = ratio;
+    return true;
+}
