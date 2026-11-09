@@ -33,6 +33,7 @@ struct WorkspaceOutput {
     bool running,exited,eof,cancelling,program;
     int status;
     double cancel_time;
+    Vector2 wheel_remainder;
     void *source;
     WorkspaceOutputReceiver receiver;
 #ifdef _WIN32
@@ -427,10 +428,6 @@ void workspace_output_update(WorkspaceOutput *output)
     if (IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP) || IsKeyPressed(KEY_K)) ++output->scroll;
     if (IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN) || IsKeyPressed(KEY_J))
         output->scroll=output->scroll ? output->scroll-1 : 0;
-    /* Horizontal trackpad gestures must not move the vertical history. */
-    float wheel=GetMouseWheelMoveV().y;
-    if (wheel>0) output->scroll+=3;
-    else if (wheel<0) output->scroll=output->scroll>3 ? output->scroll-3 : 0;
     if (IsKeyPressed(KEY_HOME)) output->scroll=scroll_limit(output);
     if (IsKeyPressed(KEY_END)) output->scroll=0;
     if (IsKeyPressed(KEY_LEFT) || IsKeyPressedRepeat(KEY_LEFT)) output->left=output->left>4 ? output->left-4 : 0;
@@ -438,6 +435,21 @@ void workspace_output_update(WorkspaceOutput *output)
     if (output->left>OUTPUT_LINE_LENGTH) output->left=OUTPUT_LINE_LENGTH;
     clamp_scroll(output);
     while (GetCharPressed()!=0) {}
+}
+
+void workspace_output_scroll(WorkspaceOutput *output, Vector2 wheel)
+{
+    if (!output) return;
+    output->wheel_remainder.x += wheel.x*3;
+    output->wheel_remainder.y += wheel.y*3;
+    int x=(int)output->wheel_remainder.x, y=(int)output->wheel_remainder.y;
+    output->wheel_remainder.x-=x; output->wheel_remainder.y-=y;
+    if (y>0) output->scroll+=(size_t)y;
+    else if (y<0) output->scroll=output->scroll>(size_t)-y ? output->scroll-(size_t)-y : 0;
+    if (x<0) output->left+=(size_t)-x;
+    else if (x>0) output->left=output->left>(size_t)x ? output->left-(size_t)x : 0;
+    if (output->left>OUTPUT_LINE_LENGTH) output->left=OUTPUT_LINE_LENGTH;
+    clamp_scroll(output);
 }
 
 void workspace_output_draw(WorkspaceOutput *output,Rectangle box,int pane,bool focused,bool zoomed)

@@ -1029,6 +1029,27 @@ static bool build_headless_tool(const char *source, const char *name, bool run)
     return build_headless_tool_flags(source, name, run, NULL);
 }
 
+static bool test_workspace(void)
+{
+    if (!build_core_library()) return false;
+    const char *output = nob_temp_sprintf("build/workspace_mouse_test%s", executable_suffix());
+    Nob_Cmd command = {0};
+    nob_cmd_append(&command, compiler(), "-std=c11", "-O2", "-Wall", "-Wextra",
+        "-ffunction-sections", "-fdata-sections", "-Iinclude", "-Isrc", "-I" RAYLIB_SRC,
+        "tests/workspace_mouse_test.c", "src/plot_command.c", "build/libmcmux.a", "-o", output);
+#ifdef __APPLE__
+    nob_cmd_append(&command, "-Wl,-dead_strip");
+#else
+    nob_cmd_append(&command, "-Wl,--gc-sections");
+#endif
+#ifndef _WIN32
+    nob_cmd_append(&command, "-lm");
+#endif
+    if (!nob_cmd_run(&command)) return false;
+    nob_cmd_append(&command, output);
+    return nob_cmd_run(&command);
+}
+
 static bool prepare_module_baseline(const char *requested)
 {
     static const char *const symbols[] = {
@@ -1174,6 +1195,7 @@ static void print_help(const char *program)
     printf("  vendor-list  Print the raylib files required by macOS and Windows\n");
     printf("  precommit    Stage the exact raylib set and verify an index-only build\n");
     printf("  test         Build and run the structure persistence tests\n");
+    printf("  test-workspace  Run headless mouse and workspace interaction tests\n");
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
     printf("  benchmark    Generate C queries, compile and run the full redstone suite\n");
     printf("               --compare-modules: one-command baseline/current module comparison\n");
@@ -1196,6 +1218,8 @@ int main(int argc, char **argv)
 
     if (strcmp(command,"test")==0)
         return build_headless_tool("tests/structure_test.c","structure_test",true) ? 0 : 1;
+    if (strcmp(command,"test-workspace")==0)
+        return test_workspace() ? 0 : 1;
     if (strcmp(command,"reader")==0)
         return build_headless_tool("tools/inspect_structure.c","inspect_structure",false) ? 0 : 1;
     if (strcmp(command,"benchmark")==0)

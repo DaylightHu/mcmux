@@ -39,5 +39,11 @@ bool workspace_layout_resize(WorkspaceLayout *layout, WorkspaceDirection directi
                               int pixels, int width, int height);
 bool workspace_layout_zoom(WorkspaceLayout *layout);
 void workspace_layout_show_gui(WorkspaceLayout *layout);
+/* Divider hit testing uses window coordinates. -1 means none; -2 is the
+ * GUI/text divider; nonnegative values identify text-tree split nodes. */
+int workspace_layout_divider_at(const WorkspaceLayout *layout, int width, int height,
+                                int x, int y);
+bool workspace_layout_drag_divider(WorkspaceLayout *layout, int divider,
+                                   int position, int width, int height);
 
 #endif

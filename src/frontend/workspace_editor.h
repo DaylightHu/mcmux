@@ -23,6 +23,16 @@ void workspace_editor_set_code(WorkspaceEditor *editor, WorkspaceCode *code);
 bool workspace_editor_has_unsaved(const WorkspaceEditor *editor);
 WorkspaceEditorAction workspace_editor_update(WorkspaceEditor *editor,
     WorkspaceEditorPrepareRun prepare_run, void *context);
+typedef struct {
+    Vector2 position, wheel;
+    bool pressed, down, released;
+    double time;
+} WorkspaceEditorPointer;
+/* Call for the hovered pane, or the pane owning an ongoing drag. Returns true
+ * while a text drag owns the pointer, even outside the pane rectangle. */
+bool workspace_editor_pointer(WorkspaceEditor *editor, Rectangle box,
+                              WorkspaceEditorPointer pointer);
+void workspace_editor_cancel_pointer(WorkspaceEditor *editor);
 void workspace_editor_draw(WorkspaceEditor *editor, Rectangle box, int pane,
                            bool focused, bool zoomed);
 void workspace_editor_message(WorkspaceEditor *editor, const char *text,

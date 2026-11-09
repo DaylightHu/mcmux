@@ -131,6 +131,8 @@ typedef struct {
     WorldMsaa world_msaa;
     Texture2D title_background;
     bool pane_prefix, pane_help;
+    bool pointer_resizing, pointer_guard;
+    int pointer_divider, pointer_pane;
     bool window_gui_visible, window_text_visible, window_resize_pending;
     bool program_active, program_gui_visible, skip_world_advance;
     int window_width, window_height, window_text_width;
@@ -2190,11 +2192,110 @@ static bool close_pane(GuiApp *app, bool force)
     return true;
 }
 
+static void cancel_workspace_pointer(GuiApp *app)
+{
+    app->pointer_resizing = false;
+    app->pointer_pane = 0;
+    for (int i = 0; i < WORKSPACE_TEXT_LIMIT; ++i)
+        workspace_editor_cancel_pointer(app->editors[i]);
+}
+
+/* A press belongs to one pane/divider until release, even outside its bounds. */
+static bool update_workspace_pointer(GuiApp *app)
+{
+    if (!IsWindowFocused()) {
+        cancel_workspace_pointer(app);
+        app->pointer_guard = false;
+        return true;
+    }
+    if (app->pointer_guard) {
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
+            !IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)) app->pointer_guard = false;
+        return true;
+    }
+    if (app->mouse_captured || app->pane_help) return false;
+    SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+    Vector2 point = GetMousePosition();
+    WorkspaceGeometry geometry;
+    workspace_geometry(app, &geometry);
+    int width = GetScreenWidth(), height = workspace_height(app);
+    WorkspaceEditorPointer pointer = {.position = point, .wheel = GetMouseWheelMoveV(),
+        .pressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT),
+        .down = IsMouseButtonDown(MOUSE_BUTTON_LEFT),
+        .released = IsMouseButtonReleased(MOUSE_BUTTON_LEFT), .time = GetTime()};
+    if ((app->pointer_resizing || app->pointer_pane) && IsKeyPressed(KEY_ESCAPE)) {
+        cancel_workspace_pointer(app);
+        return false;
+    }
+    if (app->pointer_resizing) {
+        int divider = app->pointer_divider;
+        bool vertical = divider == -2 || app->workspace.nodes[divider].split_x;
+        SetMouseCursor(vertical ? MOUSE_CURSOR_RESIZE_EW : MOUSE_CURSOR_RESIZE_NS);
+        if (workspace_layout_drag_divider(&app->workspace, divider,
+                (int)(vertical ? point.x : point.y), width, height) && divider == -2)
+            SetWindowMinSize(app->workspace.gui_width + WORKSPACE_DIVIDER + WORKSPACE_MIN_WIDTH, 650);
+        if (!pointer.down) app->pointer_resizing = false;
+        return true;
+    }
+    if (app->pointer_pane) {
+        int i = app->pointer_pane - 1;
+        if (geometry.visible[i] && app->editors[i]) {
+            SetMouseCursor(MOUSE_CURSOR_IBEAM);
+            if (!workspace_editor_pointer(app->editors[i], pane_rectangle(geometry.panes[i]), pointer))
+                app->pointer_pane = 0;
+        } else cancel_workspace_pointer(app);
+        return true;
+    }
+    int divider = workspace_layout_divider_at(&app->workspace, width, height, (int)point.x, (int)point.y);
+    if (divider != -1) {
+        bool vertical = divider == -2 || app->workspace.nodes[divider].split_x;
+        SetMouseCursor(vertical ? MOUSE_CURSOR_RESIZE_EW : MOUSE_CURSOR_RESIZE_NS);
+        if (pointer.pressed) {
+            app->pointer_resizing = true;
+            app->pointer_divider = divider;
+        }
+        return pointer.pressed || pointer.down || pointer.released;
+    }
+    for (int i = 0; i < WORKSPACE_TEXT_LIMIT; ++i) {
+        if (!geometry.visible[i] || !CheckCollisionPointRec(point, pane_rectangle(geometry.panes[i]))) continue;
+        if (pointer.pressed) {
+            app->pane_prefix = false;
+            if (app->workspace.focus != i + 1) {
+                app->workspace.focus = i + 1;
+                apply_pane_focus(app);
+            }
+        }
+        if (i + 1 == app->output_pane) workspace_output_scroll(app->output, pointer.wheel);
+        else if (app->editors[i]) {
+            if (point.y >= geometry.panes[i].y + WORKSPACE_HEADER_HEIGHT &&
+                point.y < geometry.panes[i].y + geometry.panes[i].height - WORKSPACE_HEADER_HEIGHT)
+                SetMouseCursor(MOUSE_CURSOR_IBEAM);
+            if (workspace_editor_pointer(app->editors[i], pane_rectangle(geometry.panes[i]), pointer))
+                app->pointer_pane = i + 1;
+        }
+        return pointer.pressed || pointer.wheel.x != 0 || pointer.wheel.y != 0;
+    }
+    if (geometry.gui.width > 0 && CheckCollisionPointRec(point, pane_rectangle(geometry.gui)) &&
+        (pointer.pressed || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) || IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE))) {
+        if (app->workspace.focus != 0 || app->pane_prefix ||
+            (app->screen == GUI_WORLD && !app->mouse_captured)) {
+            app->pane_prefix = false;
+            app->workspace.focus = 0;
+            apply_pane_focus(app);
+            /* Consume the complete focus click, including release-based GUI buttons. */
+            app->pointer_guard = true;
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Prefix keys are consumed before either frontend receives this frame's input. */
 static bool update_pane_keys(GuiApp *app)
 {
     bool control = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     if (control && IsKeyPressed(KEY_B)) {
+        cancel_workspace_pointer(app);
         app->pane_help = false;
         app->pane_prefix = true;
         app->pane_message[0] = '\0';
@@ -2212,6 +2313,7 @@ static bool update_pane_keys(GuiApp *app)
     }
     if (!app->pane_prefix) return false;
     if (IsKeyPressed(KEY_ESCAPE)) {
+        cancel_workspace_pointer(app);
         app->pane_prefix = false;
         apply_pane_focus(app);
         return true;
@@ -2228,7 +2330,7 @@ static bool update_pane_keys(GuiApp *app)
         if (control) {
             bool resized = workspace_layout_resize(&app->workspace, direction, 24,
                 GetScreenWidth(), workspace_height(app));
-            pane_notice(app, resized ? "Text divider moved" : "No movable text divider in this direction; GUI size is fixed");
+            pane_notice(app, resized ? "Text divider moved" : "No movable text divider in this direction");
         } else (void)workspace_layout_focus(&app->workspace, direction,
             GetScreenWidth(), workspace_height(app));
     }
@@ -2246,7 +2348,7 @@ static bool update_pane_keys(GuiApp *app)
                 character == 'L' ? WORKSPACE_RIGHT : character == 'K' ? WORKSPACE_UP : WORKSPACE_DOWN;
             bool resized = workspace_layout_resize(&app->workspace, move, 24,
                 GetScreenWidth(), workspace_height(app));
-            pane_notice(app, resized ? "Text divider moved" : "No movable text divider; GUI size is fixed");
+            pane_notice(app, resized ? "Text divider moved" : "No movable text divider");
             break;
         }
         case 'z':
@@ -2310,7 +2412,16 @@ static VoxelHit update_workspace_input(GuiApp *app)
         release_mouse(app);
         app->screen = GUI_PAUSE;
         app->pane_prefix = app->pane_help = false;
-    } else if (!update_pane_keys(app)) {
+    } else {
+        bool pane_keys = update_pane_keys(app);
+        bool pointer = false;
+        if (!app->pane_help && (!pane_keys || app->pane_prefix))
+            pointer = update_workspace_pointer(app);
+        if (pane_keys || pointer) {
+            sync_program_activity(app);
+            sync_workspace_window(app);
+            return hit;
+        }
         /* GUI modal keys are routed only while pane 0 owns focus. */
         if (app->workspace.focus > 0) update_text_pane(app);
         else if (app->screen == GUI_TITLE) update_title(app);
@@ -2355,6 +2466,8 @@ static void draw_pane_help(void)
         "mc-nvim: :make builds the current C file; :run builds and runs it",
         "mc-nvim: :model exports C queries using the file's // mcmux-model: line",
         "mc-nvim: gd definition, gD declaration, K information, Ctrl+o/Ctrl+t back",
+        "Mouse: Ctrl+b releases pointer; click a pane, drag text or dividers",
+        "Mouse: wheel scrolls hovered pane; i enters Insert, Esc returns Normal",
         "mc-nvim: :q, :q!, :wq; Arrows/hjkl move; :! runs an external command",
         "mc-output: PgUp/PgDn scroll, End follow, Ctrl+C stop command",
         "mc-gui: / and // open world and simulation commands."
