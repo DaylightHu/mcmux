@@ -1725,6 +1725,37 @@ static bool find_project_root(const char *directory,char root[EDITOR_PATH_CAPACI
     }
 }
 
+static bool project_task_tool(WorkspaceEditor *editor,const EditorBuffer *buffer,
+    char root[EDITOR_PATH_CAPACITY],char tool[EDITOR_PATH_CAPACITY])
+{
+    if (!editor->output) {
+        workspace_editor_message(editor,"build output is unavailable",true);
+        return false;
+    }
+    if (workspace_output_is_running(editor->output)) {
+        workspace_editor_message(editor,
+            "a command is already running; use mc-output Ctrl+C to stop it",true);
+        return false;
+    }
+    char directory[EDITOR_PATH_CAPACITY];
+    bool found=path_parent(buffer->path,directory) && find_project_root(directory,root);
+    if (!found) found=find_project_root(editor->command_cwd,root);
+    if (!found) {
+        workspace_editor_message(editor,"cannot find the mcmux project directory",true);
+        return false;
+    }
+#ifdef _WIN32
+    const char *tool_name="nob.exe";
+#else
+    const char *tool_name="nob";
+#endif
+    if (!path_join(root,tool_name,tool) || path_kind(tool)!=PATH_FILE) {
+        workspace_editor_message(editor,"project build tool not found; compile nob.c first",true);
+        return false;
+    }
+    return true;
+}
+
 static void build_current_program(WorkspaceEditor *editor,bool run,
     WorkspaceEditorPrepareRun prepare_run,void *context)
 {
@@ -1733,38 +1764,98 @@ static void build_current_program(WorkspaceEditor *editor,bool run,
         workspace_editor_message(editor,"open a named .c file before :make or :run",true);
         return;
     }
-    if (!editor->output) {
-        workspace_editor_message(editor,"build output is unavailable",true);
-        return;
-    }
-    if (workspace_output_is_running(editor->output)) {
-        workspace_editor_message(editor,
-            "a command is already running; use mc-output Ctrl+C to stop it",true);
-        return;
-    }
-    char directory[EDITOR_PATH_CAPACITY],root[EDITOR_PATH_CAPACITY];
-    bool found=path_parent(buffer->path,directory) && find_project_root(directory,root);
-    if (!found) found=find_project_root(editor->command_cwd,root);
-    if (!found) {
-        workspace_editor_message(editor,"cannot find the mcmux project directory",true);
-        return;
-    }
-    char tool[EDITOR_PATH_CAPACITY];
-#ifdef _WIN32
-    const char *tool_name="nob.exe";
-#else
-    const char *tool_name="nob";
-#endif
-    if (!path_join(root,tool_name,tool) || path_kind(tool)!=PATH_FILE) {
-        workspace_editor_message(editor,"project build tool not found; compile nob.c first",true);
-        return;
-    }
+    char root[EDITOR_PATH_CAPACITY],tool[EDITOR_PATH_CAPACITY];
+    if (!project_task_tool(editor,buffer,root,tool)) return;
     if (!editor_write(editor,"")) return;
     if (run && prepare_run && !prepare_run(context,editor)) return;
     const char *arguments[]={tool,run ? "run-c" : "build-c",buffer->path,NULL};
     char error[EDITOR_MESSAGE_LENGTH],label[EDITOR_MESSAGE_LENGTH];
     snprintf(label,sizeof(label),"[mc-nvim %d] :%s %.680s",editor->pane,
         run ? "run" : "make",path_name(buffer->path));
+    if (workspace_output_start_program(editor->output,arguments,root,label,editor,
+            receive_process_output,error,sizeof(error)))
+        clear_messages(editor);
+    else workspace_editor_message(editor,error,true);
+}
+
+/* Whole arguments may be quoted. Backslashes remain literal for Windows paths;
+ * no shell expansion or C-source parsing is involved. */
+static size_t model_words(const char *text,char words[3][EDITOR_PATH_CAPACITY])
+{
+    size_t count=0;
+    while (*text) {
+        while (isspace((unsigned char)*text)) ++text;
+        if (!*text) break;
+        if (count==3) return 0;
+        char quote=(*text=='\'' || *text=='"') ? *text++ : '\0';
+        size_t length=0;
+        while (*text && (quote ? *text!=quote : !isspace((unsigned char)*text))) {
+            if (length+1==EDITOR_PATH_CAPACITY) return 0;
+            words[count][length++]=*text++;
+        }
+        if (!length) return 0;
+        words[count++][length]='\0';
+        if (quote) {
+            if (*text++!=quote || (*text && !isspace((unsigned char)*text))) return 0;
+        }
+    }
+    return count;
+}
+
+static void export_current_model(WorkspaceEditor *editor,const char *argument)
+{
+    EditorBuffer *buffer=current_buffer(editor);
+    if (!buffer || !buffer->named || !extension_equal(buffer->path,".c")) {
+        workspace_editor_message(editor,"open a named .c file before :model",true);
+        return;
+    }
+    const char *specification=*argument ? argument : NULL;
+    if (!specification) {
+        static const char prefix[]="// mcmux-model:";
+        for (size_t row=0;row<buffer->line_count;++row) {
+            const char *line=buffer->lines[row].text;
+            while (*line==' ' || *line=='\t') ++line;
+            if (strncmp(line,prefix,sizeof(prefix)-1)) continue;
+            if (specification) {
+                workspace_editor_message(editor,"keep only one // mcmux-model: line",true);
+                return;
+            }
+            specification=line+sizeof(prefix)-1;
+        }
+    }
+    if (!specification) {
+        workspace_editor_message(editor,
+            "add // mcmux-model: INPUT.mcs OUTPUT.c SYMBOL, or use :model INPUT.mcs OUTPUT.c [SYMBOL]",true);
+        return;
+    }
+    char words[3][EDITOR_PATH_CAPACITY];
+    size_t count=model_words(specification,words);
+    if (count<2 || !extension_equal(words[0],".mcs") ||
+        !extension_equal(words[1],".c")) {
+        workspace_editor_message(editor,"usage: :model INPUT.mcs OUTPUT.c [SYMBOL] (quote paths with spaces)",true);
+        return;
+    }
+    char root[EDITOR_PATH_CAPACITY],tool[EDITOR_PATH_CAPACITY];
+    if (!project_task_tool(editor,buffer,root,tool)) return;
+    char output[EDITOR_PATH_CAPACITY];
+    if (!path_resolve(root,words[1],output)) {
+        workspace_editor_message(editor,"model output path is too long",true);
+        return;
+    }
+    if (paths_equal(output,buffer->path)) {
+        workspace_editor_message(editor,"model output must differ from the current C program",true);
+        return;
+    }
+    size_t open=buffer_find(editor,output);
+    if (open!=SIZE_MAX && editor->buffers[open]->dirty) {
+        workspace_editor_message(editor,"model output has unsaved changes in an open buffer",true);
+        return;
+    }
+    if (!editor_write(editor,"")) return;
+    const char *arguments[]={tool,"export-c",words[0],words[1],
+        count==3 ? words[2] : "mcmux_circuit",NULL};
+    char error[EDITOR_MESSAGE_LENGTH],label[EDITOR_MESSAGE_LENGTH];
+    snprintf(label,sizeof(label),"[mc-nvim %d] :model %.680s",editor->pane,path_name(words[0]));
     if (workspace_output_start_program(editor->output,arguments,root,label,editor,
             receive_process_output,error,sizeof(error)))
         clear_messages(editor);
@@ -1926,6 +2017,8 @@ static WorkspaceEditorAction execute_editor_command(WorkspaceEditor *editor,
         if (*argument) workspace_editor_message(editor,"usage: :make or :run",true);
         else build_current_program(editor,strcmp(command,"run")==0,
                                    prepare_run,context);
+    } else if (strcmp(command,"model")==0) {
+        export_current_model(editor,argument);
     } else if (strcmp(command,"definition")==0 || strcmp(command,"declaration")==0 || strcmp(command,"hover")==0) {
         if (*argument) workspace_editor_message(editor,"usage: :definition, :declaration or :hover",true);
         else query_code(editor,!strcmp(command,"hover") ? CODE_HOVER :
