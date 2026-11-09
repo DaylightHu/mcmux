@@ -1,8 +1,17 @@
 ![Background](./res/gui/title_background.png)
 # mcmux
-mcmux is a C redstone sandbox based on Minecraft 1.16.2. The GUI combines a
-world editor, redstone simulation, saved worlds, structure export, and an
-embedded mc-nvim workspace.
+mcmux is an experimental redstone simulator written in C, based on Minecraft 1.16.2. It started as a project to learn raylib and later evolved into an effort to combine redstone construction with programming.
+
+The goal is to give users control over circuit inputs, execution backends, and simulation time, enabling faster execution of circuits built entirely from redstone. The computation remains in the circuits themselves, with their logic and in-game timing preserved.
+
+
+> [!TIP]
+> **📖 API Reference**
+>
+> Explore public functions, grouped by purpose, with concise descriptions.
+>
+> [**English →**](docs/mcmux-api-en.html) · [**简体中文 →**](docs/mcmux-api-zh.html)
+>
 
 ## Build
 
