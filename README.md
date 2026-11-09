@@ -93,3 +93,4 @@ The repository includes an example world at `saves/examples/`.
 - https://github.com/maruohon/tweakeroo
 - https://github.com/EngineHub/WorldEdit
 - https://github.com/tmux/tmux
+- https://github.com/neovim/neovim
