@@ -1,6 +1,6 @@
 /*******************************************************************************************
 *
-*   mcmux example - Two-bit carry-cancel adder
+*   mcmux example - carry-cancel cell(I made it a two-piece design to make stacking easier.)
 *
 *   Adds two unsigned two-bit operands using four levers. Checks the three
 *   output iron blocks after each game tick, then writes back the result.
@@ -14,7 +14,17 @@
 
 #include "mcmux.h"
 
-enum { INPUT_BITS = 2, OUTPUT_BITS = 3, PROPAGATION_DELAY = 6 };
+#define REFERENCE_BACKEND 1
+#define CPU_BACKEND 2
+#define GENERATED_C_BACKEND 3
+#define ADDER_BACKEND GENERATED_C_BACKEND
+
+#if ADDER_BACKEND == GENERATED_C_BACKEND
+/* Export the model as build/carry_cancel_model.c with symbol carry_cancel_model. */
+#include "../../build/carry_cancel_model.c"
+#endif
+
+enum { INPUT_BITS = 2, OUTPUT_BITS = 3, PROPAGATION_DELAY = 6, NOMINAL_TPS = 20 };
 
 static const BlockPos INPUT_A[INPUT_BITS] = {{23, 4, 22}, {23, 6, 22}};
 static const BlockPos INPUT_B[INPUT_BITS] = {{20, 4, 22}, {20, 6, 22}};
@@ -62,6 +72,28 @@ int main(void)
     World *world = load_mcs("saves/examples/carry_cancel_cell.mcs", ANCHOR);
     if (!world) return EXIT_FAILURE;
 
+#if ADDER_BACKEND != REFERENCE_BACKEND
+    const BlockPos min = {18, 2, 22};
+    const BlockPos max = {23, 7, 30};
+#endif
+#if ADDER_BACKEND == REFERENCE_BACKEND
+    const char *backend = "reference";
+    RsResult attach = RS_OK;
+#elif ADDER_BACKEND == CPU_BACKEND
+    const char *backend = "cpu";
+    RsResult attach = sim_use_cpu(world, min, max);
+#elif ADDER_BACKEND == GENERATED_C_BACKEND
+    const char *backend = "generated-c";
+    RsResult attach = sim_use_c(world, min, max, &carry_cancel_model);
+#else
+#error Invalid ADDER_BACKEND
+#endif
+    if (attach != RS_OK) {
+        fprintf(stderr, "Cannot select %s backend (%s)\n", backend, rs_result_name(attach));
+        world_destroy(world);
+        return attach;
+    }
+
     for (unsigned bit = 0; bit < OUTPUT_BITS; ++bit)
         world_expect(world, world_get(world, OUTPUT[bit]).id == BLOCK_IRON,
                      "output %u must be an iron block", bit + 1);
@@ -73,6 +105,7 @@ int main(void)
         .expected_sum = a + b,
     };
 
+    double start = mcmux_monotonic_seconds();
     drive_input(world, INPUT_A, 'A', a);
     drive_input(world, INPUT_B, 'B', b);
     world_expect(world, valid(world, &check), "adder output changed on the input tick");
@@ -84,14 +117,21 @@ int main(void)
     });
     sim_advance_ticks(world, PROPAGATION_DELAY);
 
+    unsigned sum = world_result(world) == RS_OK ? read_output(world) : 0;
+    double end = mcmux_monotonic_seconds();
+    uint64_t elapsed_ticks = world_tick(world) - check.input_tick;
+
     if (world_result(world) == RS_OK) {
-        unsigned sum = read_output(world);
         writeback_mcs(world, "saves/examples/carry_cancel_cell.mcs", ANCHOR, "saves/examples/examples.mcw");
         if (world_result(world) == RS_OK)
-            printf("%u + %u = %u (O3 O2 O1 = %u%u%u) at %d gt\n",
+            printf("%u + %u = %u (O3 O2 O1 = %u%u%u) at %" PRIu64 " gt\n",
                    a, b, sum, (sum >> 2) & 1u, (sum >> 1) & 1u, sum & 1u,
-                   PROPAGATION_DELAY);
+                   elapsed_ticks);
     }
+    printf("backend=%s expected_ticks=%d elapsed_ticks=%" PRIu64 " nominal_ms=%.3f wall_ms=",
+           backend, PROPAGATION_DELAY, elapsed_ticks, (double)elapsed_ticks * 1000.0 / NOMINAL_TPS);
+    if (start > 0.0 && end >= start) printf("%.3f\n", (end - start) * 1000.0);
+    else puts("unavailable");
 
     RsResult result = world_result(world);
     world_destroy(world);

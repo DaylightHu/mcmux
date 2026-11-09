@@ -21,7 +21,7 @@ bool workspace_output_start_program(WorkspaceOutput *output,
     char *error, size_t error_capacity);
 void workspace_output_detach(WorkspaceOutput *output, void *source);
 bool workspace_output_is_running(const WorkspaceOutput *output);
-/* Argument-based program tasks (:make/:run), including cancellation cleanup. */
+/* Argument-based program tasks (:make/:run/:model), including cancellation cleanup. */
 bool workspace_output_is_program_running(const WorkspaceOutput *output);
 void workspace_output_poll(WorkspaceOutput *output);
 void workspace_output_cancel(WorkspaceOutput *output);

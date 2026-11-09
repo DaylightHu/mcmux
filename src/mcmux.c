@@ -1,11 +1,17 @@
 #include "mcmux.h"
 #include "region_edit_internal.h"
+#include "runtime_clock.h"
 #include "save_file.h"
 #include "world_internal.h"
 
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+double mcmux_monotonic_seconds(void)
+{
+    return runtime_clock_now();
+}
 
 static RsResult structure_writeback_result(StructureResult result)
 {

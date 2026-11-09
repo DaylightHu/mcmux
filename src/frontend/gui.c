@@ -2163,7 +2163,7 @@ static bool close_pane(GuiApp *app, bool force)
     }
     if (app->program_active && pane > 0 && app->workspace.root >= 0 &&
         app->workspace.nodes[app->workspace.root].first < 0) {
-        pane_notice(app, "Keep a text pane open until :make/:run finishes");
+        pane_notice(app, "Keep a text pane open until :make/:run/:model finishes");
         return false;
     }
     if (!force && pane > 0 && app->editors[pane - 1] &&
@@ -2257,7 +2257,7 @@ static bool update_pane_keys(GuiApp *app)
         case 'x': (void)close_pane(app, false); break;
         case 'g':
             if (app->program_active)
-                pane_notice(app, "mc-gui is paused during :make/:run; stop the task with mc-output Ctrl+C");
+                pane_notice(app, "mc-gui is paused during :make/:run/:model; stop the task with mc-output Ctrl+C");
             else workspace_layout_show_gui(&app->workspace);
             break;
         case '?': app->pane_help = true; break;
@@ -2353,6 +2353,7 @@ static void draw_pane_help(void)
         "mc-nvim: v/V select, y copy, d delete, dd/yy line, D to end, p/P paste",
         "mc-nvim: i/a insert, Esc normal, :Ex, :e path, :w",
         "mc-nvim: :make builds the current C file; :run builds and runs it",
+        "mc-nvim: :model exports C queries using the file's // mcmux-model: line",
         "mc-nvim: gd definition, gD declaration, K information, Ctrl+o/Ctrl+t back",
         "mc-nvim: :q, :q!, :wq; Arrows/hjkl move; :! runs an external command",
         "mc-output: PgUp/PgDn scroll, End follow, Ctrl+C stop command",

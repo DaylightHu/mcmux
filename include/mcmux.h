@@ -10,6 +10,10 @@
 #include "rs/sim.h"
 #include "rs/compiled.h"
 
+/* Monotonic wall-clock seconds. Subtract two readings to measure elapsed time.
+ * A zero reading means the clock is unavailable. */
+double mcmux_monotonic_seconds(void);
+
 /* Load an MCS structure with its saved anchor placed at anchor. On failure,
  * report the error and return NULL without terminating the host process. */
 World *load_mcs(const char *path, BlockPos anchor);
