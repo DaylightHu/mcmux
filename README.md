@@ -10,7 +10,7 @@ The goal is to give users control over circuit inputs, execution backends, and s
 >
 > Explore public functions, grouped by purpose, with concise descriptions.
 >
-> [**English →**](docs/mcmux-api-en.html) · [**简体中文 →**](docs/mcmux-api-zh.html)
+> [**English →**](https://daylighthu.github.io/mcmux/mcmux-api-en.html) · [**简体中文 →**](https://daylighthu.github.io/mcmux/mcmux-api-zh.html)
 >
 
 ## Build
