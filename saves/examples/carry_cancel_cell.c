@@ -11,13 +11,14 @@
 *   Example created by DaylightHu (@DaylightHu)
 *
 ********************************************************************************************/
-
 #include "mcmux.h"
+
+// mcmux-model: saves/examples/carry_cancel_cell.mcs build/carry_cancel_model.c carry_cancel_model
 
 #define REFERENCE_BACKEND 1
 #define CPU_BACKEND 2
 #define GENERATED_C_BACKEND 3
-#define ADDER_BACKEND GENERATED_C_BACKEND
+#define ADDER_BACKEND CPU_BACKEND
 
 #if ADDER_BACKEND == GENERATED_C_BACKEND
 /* Export the model as build/carry_cancel_model.c with symbol carry_cancel_model. */

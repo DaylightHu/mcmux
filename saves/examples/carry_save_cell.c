@@ -20,7 +20,7 @@
 #define REFERENCE_BACKEND 1
 #define CPU_BACKEND 2
 #define GENERATED_C_BACKEND 3
-#define ADDER_BACKEND REFERENCE_BACKEND
+#define ADDER_BACKEND GENERATED_C_BACKEND
 
 #if ADDER_BACKEND == GENERATED_C_BACKEND
 /* Export the model as build/carry_save_model.c with symbol carry_save_model. */
@@ -125,7 +125,7 @@ int main(void)
     uint8_t previous_carry = output_power(world, CARRY);
 
     bool input_a = true;
-    bool input_b = true;
+    bool input_b = false;
     bool input_c = true;
 
     double start = mcmux_monotonic_seconds();
