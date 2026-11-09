@@ -14,6 +14,8 @@
 
 #include "mcmux.h"
 
+// mcmux-model: saves/examples/carry_cancel_cell.mcs build/carry_cancel_model.c carry_cancel_model
+
 #define REFERENCE_BACKEND 1
 #define CPU_BACKEND 2
 #define GENERATED_C_BACKEND 3
