@@ -25,7 +25,7 @@ extern char **environ;
 #endif
 
 enum { OUTPUT_LINES=2048, OUTPUT_LINE_LENGTH=1024, OUTPUT_READ_BUDGET=65536,
-       OUTPUT_HEADER_HEIGHT=25 };
+       OUTPUT_STATUS_HEIGHT=25 };
 #define OUTPUT_FONT_SIZE (app_config_current()->output_font_size)
 #define OUTPUT_ROW_HEIGHT (OUTPUT_FONT_SIZE + 4)
 typedef struct { char text[OUTPUT_LINE_LENGTH]; bool error; } OutputLine;
@@ -456,18 +456,14 @@ void workspace_output_scroll(WorkspaceOutput *output, Vector2 wheel)
     clamp_scroll(output);
 }
 
-void workspace_output_draw(WorkspaceOutput *output,Rectangle box,int pane,bool focused,bool zoomed)
+void workspace_output_draw(WorkspaceOutput *output,Rectangle box,bool focused)
 {
     if (!output || box.width<2 || box.height<2) return;
     Color accent=focused ? (Color){172,143,255,255} : (Color){118,130,143,255};
     DrawRectangleRec(box,(Color){22,27,36,255});
     BeginScissorMode((int)box.x,(int)box.y,(int)box.width,(int)box.height);
-    DrawRectangle((int)box.x,(int)box.y,(int)box.width,OUTPUT_HEADER_HEIGHT,(Color){34,42,53,255});
-    char title[96];
-    snprintf(title,sizeof(title),"%d: mc-output%s%s%s",pane,output->running ? " [running]" : "",zoomed ? " [zoom]" : "",focused ? " *" : "");
-    ui_text_draw(title,(int)box.x+8,(int)box.y+5,16,accent);
-    int bottom=(int)(box.y+box.height)-OUTPUT_HEADER_HEIGHT;
-    int rows=(bottom-(int)box.y-OUTPUT_HEADER_HEIGHT-4)/OUTPUT_ROW_HEIGHT;
+    int bottom=(int)(box.y+box.height)-OUTPUT_STATUS_HEIGHT;
+    int rows=(bottom-(int)box.y-4)/OUTPUT_ROW_HEIGHT;
     if (rows<0) rows=0;
     output->visible_rows=(size_t)rows;
     clamp_scroll(output);
@@ -483,14 +479,15 @@ void workspace_output_draw(WorkspaceOutput *output,Rectangle box,int pane,bool f
             while (((unsigned char)text[offset]&0xc0)==0x80) ++offset;
             ++column;
         }
-        ui_text_draw(text+offset,(int)box.x+8,(int)box.y+OUTPUT_HEADER_HEIGHT+3+(int)(row-start)*OUTPUT_ROW_HEIGHT,
+        ui_text_draw(text+offset,(int)box.x+8,(int)box.y+3+(int)(row-start)*OUTPUT_ROW_HEIGHT,
             OUTPUT_FONT_SIZE,line && line->error ? (Color){255,128,128,255} : (Color){211,222,231,255});
     }
-    DrawRectangle((int)box.x,bottom,(int)box.width,OUTPUT_HEADER_HEIGHT,(Color){44,38,63,255});
+    DrawRectangle((int)box.x,bottom,(int)box.width,OUTPUT_STATUS_HEIGHT,(Color){44,38,63,255});
     char stop[128],follow[128],footer[320];
     app_config_describe(APP_OUTPUT,"cancel",stop,sizeof(stop));
     app_config_describe(APP_OUTPUT,"end",follow,sizeof(follow));
-    snprintf(footer,sizeof(footer),"%s follow | %s stop",follow,stop);
+    snprintf(footer,sizeof(footer),"%s%s follow | %s stop",
+             output->running ? "[running] | " : "",follow,stop);
     ui_text_draw(footer,(int)box.x+7,bottom+5,14,accent);
     EndScissorMode();
     DrawRectangleLinesEx(box,focused ? 2 : 1,accent);

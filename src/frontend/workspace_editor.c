@@ -47,8 +47,6 @@ enum {
     EDITOR_MESSAGE_LIMIT = 32,
     EDITOR_MESSAGE_LENGTH = 768,
     EDITOR_COMMAND_CAPACITY = 520,
-    EDITOR_HEADER_HEIGHT = 25,
-    EDITOR_HEADER_FONT_SIZE = 16,
     EDITOR_DRAW_CAPACITY = 8192
 };
 
@@ -2628,9 +2626,9 @@ static EditorView editor_view(const WorkspaceEditor *editor, Rectangle box)
     view.cell_width = ui_text_width("M", EDITOR_FONT_SIZE);
     if (view.cell_width < 1) view.cell_width = 1;
     view.status_y = (int)(box.y + box.height) - EDITOR_STATUS_HEIGHT;
-    int available = (view.status_y - (int)box.y - EDITOR_HEADER_HEIGHT)/EDITOR_ROW_HEIGHT;
+    view.body_top = (int)box.y + 3;
+    int available = (view.status_y - view.body_top)/EDITOR_ROW_HEIGHT;
     view.message_rows = visible_message_rows(editor, available);
-    view.body_top = (int)box.y + EDITOR_HEADER_HEIGHT + 3;
     view.body_bottom = view.status_y - view.message_rows*EDITOR_ROW_HEIGHT - 2;
     view.rows = (view.body_bottom - view.body_top)/EDITOR_ROW_HEIGHT;
     if (view.rows < 0) view.rows = 0;
@@ -2695,6 +2693,7 @@ bool workspace_editor_pointer(WorkspaceEditor *editor, Rectangle box,
     }
     bool inside = pointer.position.x >= box.x && pointer.position.x < box.x + box.width &&
                   pointer.position.y >= view.body_top && pointer.position.y < view.body_bottom;
+    if (inside) SetMouseCursor(MOUSE_CURSOR_IBEAM);
     editor->wheel_remainder.x += pointer.wheel.x*app_config_current()->scroll_lines;
     editor->wheel_remainder.y += pointer.wheel.y*app_config_current()->scroll_lines;
     int x = (int)editor->wheel_remainder.x, y = (int)editor->wheel_remainder.y;
@@ -2894,11 +2893,12 @@ static void draw_buffer(WorkspaceEditor *editor, EditorView view, bool focused)
     }
 }
 
-static void draw_code_info(WorkspaceEditor *editor,Rectangle box,int cell_width)
+static void draw_code_info(WorkspaceEditor *editor,Rectangle box,int status_y,int cell_width)
 {
     EditorBuffer *info=editor->code_info;
     if (!info || box.width<100 || box.height<100) return;
-    int rows=((int)box.height-2*EDITOR_HEADER_HEIGHT-24)/EDITOR_ROW_HEIGHT-2;
+    int y=(int)box.y+10;
+    int rows=(status_y-y-12)/EDITOR_ROW_HEIGHT-2;
     if (rows>20) rows=20;
     if (rows>(int)info->line_count) rows=(int)info->line_count;
     if (rows<1) return;
@@ -2908,7 +2908,6 @@ static void draw_code_info(WorkspaceEditor *editor,Rectangle box,int cell_width)
     if (width>880) width=880;
     int height=(rows+2)*EDITOR_ROW_HEIGHT+12;
     int x=(int)box.x+((int)box.width-width)/2;
-    int y=(int)box.y+EDITOR_HEADER_HEIGHT+10;
     DrawRectangle(x,y,width,height,(Color){29,33,44,255});
     DrawRectangleLines(x,y,width,height,(Color){172,143,255,255});
     ui_text_draw("Symbol information",x+8,y+5,EDITOR_FONT_SIZE,(Color){205,188,255,255});
@@ -2936,8 +2935,7 @@ static const char *mode_name(EditorMode mode)
     }
 }
 
-void workspace_editor_draw(WorkspaceEditor *editor, Rectangle box, int pane,
-                           bool focused, bool zoomed)
+void workspace_editor_draw(WorkspaceEditor *editor, Rectangle box, bool focused)
 {
     if (!editor || box.width < 2 || box.height < 2) return;
     EditorView view = editor_view(editor, box);
@@ -2946,18 +2944,6 @@ void workspace_editor_draw(WorkspaceEditor *editor, Rectangle box, int pane,
                              (Color){79, 89, 99, 255};
     DrawRectangleRec(box, (Color){30, 30, 30, 255});
     BeginScissorMode((int)box.x, (int)box.y, (int)box.width, (int)box.height);
-    DrawRectangle((int)box.x, (int)box.y, (int)box.width,
-                  EDITOR_HEADER_HEIGHT, (Color){34, 42, 53, 255});
-    const EditorBuffer *buffer = current_buffer_const(editor);
-    const char *name = editor->mode == EDITOR_BROWSER ? editor->cwd :
-        buffer && buffer->named ? path_name(buffer->path) : "[No Name]";
-    char title[EDITOR_PATH_CAPACITY + 96];
-    snprintf(title, sizeof(title), "%d: mc-nvim %s%s%s%s%s", pane, name,
-             buffer && buffer->dirty ? " [+]" : "",
-             buffer && buffer->readonly ? " [RO]" : "",
-             zoomed ? " [zoom]" : "", focused ? " *" : "");
-    ui_text_draw(title, (int)box.x + 8, (int)box.y + 5,
-                 EDITOR_HEADER_FONT_SIZE, accent);
     int status_y = view.status_y, message_rows = view.message_rows;
     if (editor->mode == EDITOR_BROWSER)
         draw_browser(editor, box, view.body_top, view.body_bottom, cell_width);
@@ -2987,19 +2973,37 @@ void workspace_editor_draw(WorkspaceEditor *editor, Rectangle box, int pane,
             DrawRectangle(x, status_y + 3, 2, EDITOR_FONT_SIZE + 1, RAYWHITE);
         }
     } else {
-        ui_text_draw(mode_name(editor->mode), (int)box.x + 7,
-                     status_y + 3, EDITOR_FONT_SIZE, RAYWHITE);
-        if (buffer && editor->mode != EDITOR_BROWSER) {
+        const char *mode = mode_name(editor->mode);
+        int left = (int)box.x + 7;
+        int right = (int)(box.x + box.width) - 7;
+        ui_text_draw(mode, left, status_y + 3, EDITOR_FONT_SIZE, RAYWHITE);
+        left += ui_text_width(mode, EDITOR_FONT_SIZE) + 2*cell_width;
+        bool browser = editor->mode == EDITOR_BROWSER;
+        const EditorBuffer *buffer = current_buffer_const(editor);
+        if (buffer && !browser) {
             char location[64];
             snprintf(location, sizeof(location), "%zu,%zu",
                      buffer->row + 1,
                      text_column(&buffer->lines[buffer->row], buffer->column) + 1);
-            int width = ui_text_width(location, EDITOR_FONT_SIZE);
-            ui_text_draw(location, (int)(box.x + box.width) - width - 7,
-                         status_y + 3, EDITOR_FONT_SIZE, RAYWHITE);
+            right -= ui_text_width(location, EDITOR_FONT_SIZE);
+            if (right >= left - cell_width)
+                ui_text_draw(location, right, status_y + 3, EDITOR_FONT_SIZE, RAYWHITE);
+            right -= cell_width;
+        }
+        int columns = (right - left)/cell_width;
+        if (columns > 0) {
+            const char *name = browser ? editor->cwd :
+                buffer && buffer->named ? path_name(buffer->path) : "[No Name]";
+            char label[EDITOR_PATH_CAPACITY + 16], visible[EDITOR_DRAW_CAPACITY];
+            snprintf(label, sizeof(label), "%s%s%s",
+                     buffer && !browser && buffer->dirty ? "[+] " : "",
+                     buffer && !browser && buffer->readonly ? "[RO] " : "", name);
+            EditorLine line = {.text = label, .length = strlen(label)};
+            display_slice(&line, 0, (size_t)columns, visible);
+            ui_text_draw(visible, left, status_y + 3, EDITOR_FONT_SIZE, RAYWHITE);
         }
     }
-    draw_code_info(editor,box,cell_width);
+    draw_code_info(editor,box,status_y,cell_width);
     EndScissorMode();
     DrawRectangleLinesEx(box, focused ? 2 : 1, accent);
 }

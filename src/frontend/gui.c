@@ -36,7 +36,6 @@ enum {
     SCREEN_WIDTH = 1080,
     SCREEN_HEIGHT = 800,
     WORKSPACE_STATUS_HEIGHT = 26,
-    WORKSPACE_HEADER_HEIGHT = 25,
     MESSAGE_CAPACITY = 192,
     COMMAND_CAPACITY = 128,
     CHAT_HISTORY_CAPACITY = 100,
@@ -2093,8 +2092,6 @@ static bool prepare_gui_view(GuiApp *app)
     WorkspaceGeometry geometry;
     workspace_geometry(app, &geometry);
     Rectangle box = pane_rectangle(geometry.gui);
-    box.y += WORKSPACE_HEADER_HEIGHT;
-    box.height -= WORKSPACE_HEADER_HEIGHT;
     int width = (int)box.width, height = (int)box.height;
     if (width < 640) width = 640;
     if (height < 560) height = 560;
@@ -2296,13 +2293,9 @@ static bool update_workspace_pointer(GuiApp *app)
             }
         }
         if (i + 1 == app->output_pane) workspace_output_scroll(app->output, pointer.wheel);
-        else if (app->editors[i]) {
-            if (point.y >= geometry.panes[i].y + WORKSPACE_HEADER_HEIGHT &&
-                point.y < geometry.panes[i].y + geometry.panes[i].height - WORKSPACE_HEADER_HEIGHT)
-                SetMouseCursor(MOUSE_CURSOR_IBEAM);
-            if (workspace_editor_pointer(app->editors[i], pane_rectangle(geometry.panes[i]), pointer))
-                app->pointer_pane = i + 1;
-        }
+        else if (app->editors[i] &&
+                 workspace_editor_pointer(app->editors[i], pane_rectangle(geometry.panes[i]), pointer))
+            app->pointer_pane = i + 1;
         return pointer.pressed || pointer.wheel.x != 0 || pointer.wheel.y != 0;
     }
     if (geometry.gui.width > 0 && CheckCollisionPointRec(point, pane_rectangle(geometry.gui)) &&
@@ -2538,25 +2531,20 @@ static void draw_workspace(GuiApp *app, VoxelHit hit)
         }
         EndTextureMode();
         Rectangle box = pane_rectangle(geometry.gui);
-        box.y += WORKSPACE_HEADER_HEIGHT; box.height -= WORKSPACE_HEADER_HEIGHT;
         DrawTexturePro(app->gui_target.texture,
             (Rectangle){0, 0, (float)app->gui_target.texture.width, -(float)app->gui_target.texture.height},
             box, (Vector2){0}, 0, WHITE);
-        DrawRectangle(geometry.gui.x, geometry.gui.y, geometry.gui.width, WORKSPACE_HEADER_HEIGHT,
-            (Color){34, 42, 53, 255});
         Color accent = app->workspace.focus == 0 ? (Color){172, 143, 255, 255} : (Color){118, 130, 143, 255};
-        ui_text_draw(app->workspace.focus == 0 ? "0: mc-gui *" : "0: mc-gui", 8, 5, 16, accent);
-        DrawRectangleLinesEx(pane_rectangle(geometry.gui), app->workspace.focus == 0 ? 2 : 1, accent);
+        DrawRectangleLinesEx(box, app->workspace.focus == 0 ? 2 : 1, accent);
     }
     gui_view_reset();
     for (int i = 0; i < WORKSPACE_TEXT_LIMIT; ++i) {
         if (geometry.visible[i] && app->output_pane==i+1)
             workspace_output_draw(app->output,pane_rectangle(geometry.panes[i]),
-                i+1,app->workspace.focus==i+1,app->workspace.zoom>0 || geometry.compact);
+                app->workspace.focus==i+1);
         if (geometry.visible[i] && app->editors[i])
             workspace_editor_draw(app->editors[i], pane_rectangle(geometry.panes[i]),
-                i + 1, app->workspace.focus == i + 1,
-                app->workspace.zoom > 0 || geometry.compact);
+                app->workspace.focus == i + 1);
     }
     int y = GetScreenHeight() - WORKSPACE_STATUS_HEIGHT;
     const char *state = app->screen == GUI_SAVE_ERROR ? "SAVE ERROR" :
