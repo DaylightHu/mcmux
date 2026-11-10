@@ -21,6 +21,10 @@ void workspace_editor_set_output(WorkspaceEditor *editor, WorkspaceOutput *outpu
                                   int pane);
 void workspace_editor_set_code(WorkspaceEditor *editor, WorkspaceCode *code);
 bool workspace_editor_has_unsaved(const WorkspaceEditor *editor);
+bool workspace_editor_config_dirty(const WorkspaceEditor *editor);
+WorkspaceEditorAction workspace_editor_command(WorkspaceEditor *editor, const char *command,
+    WorkspaceEditorPrepareRun prepare_run, void *context);
+void workspace_editor_refresh(WorkspaceEditor *editor);
 WorkspaceEditorAction workspace_editor_update(WorkspaceEditor *editor,
     WorkspaceEditorPrepareRun prepare_run, void *context);
 typedef struct {

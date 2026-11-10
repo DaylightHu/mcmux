@@ -1,6 +1,7 @@
 #include "gui_view.h"
 #include "gui.h"
 #include "ui_font.h"
+#include "app_config.h"
 
 #include "block_renderer.h"
 #include "block_shape.h"
@@ -131,6 +132,9 @@ typedef struct {
     WorldMsaa world_msaa;
     Texture2D title_background;
     bool pane_prefix, pane_help;
+    double prefix_deadline;
+    unsigned config_revision;
+    int help_scroll;
     bool pointer_resizing, pointer_guard;
     int pointer_divider, pointer_pane;
     bool window_gui_visible, window_text_visible, window_resize_pending;
@@ -428,7 +432,7 @@ static bool open_world(GuiApp *app, const char *name, GameSession *session)
         (int)camera_axis_within(16.0f, bounds.min_x, bounds.max_x), 3,
         (int)camera_axis_within(16.0f, bounds.min_z, bounds.max_z)
     };
-    if (world_stream(world,spawn,5) != RS_OK) {
+    if (world_stream(world,spawn,app_config_current()->stream_radius) != RS_OK) {
         snprintf(app->message,sizeof(app->message),"Cannot load world chunks");
         return false;
     }
@@ -452,7 +456,7 @@ static bool open_world(GuiApp *app, const char *name, GameSession *session)
     app->camera.position = (Vector3){(float)spawn.x, 3.0f, (float)spawn.z};
     app->camera.target = (Vector3){(float)spawn.x, 2.0f, (float)spawn.z - 1.0f};
     app->camera.up = (Vector3){0.0f, 1.0f, 0.0f};
-    app->camera.fovy = 65.0f;
+    app->camera.fovy = app_config_current()->fov;
     app->camera.projection = CAMERA_PERSPECTIVE;
     app->screen = GUI_WORLD;
     snprintf(app->message, sizeof(app->message),
@@ -592,7 +596,7 @@ static void load_selected_world(GuiApp *app)
 static void update_name_input(GuiApp *app)
 {
     int character;
-    while ((character = GetCharPressed()) != 0) {
+    while ((character = app_input_char()) != 0) {
         bool allowed = character < 128 &&
             (isalnum((unsigned char)character) || character == ' ' ||
              character == '-' || character == '_');
@@ -914,7 +918,7 @@ static void update_command(GuiApp *app)
     if (app->chat_scroll > CHAT_HISTORY_CAPACITY*CHAT_TEXT_CAPACITY)
         app->chat_scroll = CHAT_HISTORY_CAPACITY*CHAT_TEXT_CAPACITY;
     int character;
-    while ((character = GetCharPressed()) != 0) {
+    while ((character = app_input_char()) != 0) {
         if (character >= 32 && character < 127 &&
             app->command_length + 1 < sizeof(app->command)) {
             app->command[app->command_length++] = (char)character;
@@ -1005,9 +1009,9 @@ static void constrain_camera(GuiApp *app, const World *world)
 static VoxelHit update_world(GuiApp *app)
 {
     VoxelHit hit = {0};
-    if (IsKeyPressed(KEY_SLASH)) {
+    if (app_input_world("command",false)) {
         release_mouse(app);
-        while (GetCharPressed() != 0) {} /* Consume the key that opened chat. */
+        while (app_input_char() != 0) {} /* Consume the key that opened chat. */
         app->command[0] = '\0';
         app->command_length = 0;
         app->completion = (CommandCompletion){0};
@@ -1015,14 +1019,14 @@ static VoxelHit update_world(GuiApp *app)
         app->screen = GUI_COMMAND;
         return hit;
     }
-    if (IsKeyPressed(KEY_E)) {
+    if (app_input_world("inventory",false)) {
         release_mouse(app);
         app->screen = GUI_INVENTORY;
         snprintf(app->message, sizeof(app->message),
                  "Inventory: choose a hotbar slot, then click an icon");
         return hit;
     }
-    if (IsKeyPressed(KEY_ESCAPE) || !IsWindowFocused()) {
+    if (app_input_world("pause",false) || !IsWindowFocused()) {
         release_mouse(app);
         app->screen = GUI_PAUSE;
         game_session_reset_clock(app->session);
@@ -1030,15 +1034,32 @@ static VoxelHit update_world(GuiApp *app)
     }
 
     hotbar_update(&app->hotbar);
-    UpdateCamera(&app->camera, CAMERA_FIRST_PERSON);
-    const float vertical_speed = 5.0f;
-    float vertical_input = 0.0f;
-    if (IsKeyDown(KEY_SPACE)) vertical_input += 1.0f;
-    if (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT))
-        vertical_input -= 1.0f;
-    float vertical_delta = vertical_input*vertical_speed*GetFrameTime();
-    app->camera.position.y += vertical_delta;
-    app->camera.target.y += vertical_delta;
+    const AppSettings *settings=app_config_current();
+    float step=settings->move_speed*GetFrameTime();
+    Vector2 mouse=GetMouseDelta();
+    Vector3 movement={
+        (app_input_world("forward",true)-app_input_world("backward",true))*step,
+        (app_input_world("right",true)-app_input_world("left",true))*step,
+        (app_input_world("up",true)-app_input_world("down",true))*step*(5.0f/5.4f)
+    };
+    float turn=0.03f*GetFrameTime();
+    Vector3 rotation={
+        (mouse.x*settings->mouse_sensitivity +
+         (app_input_world("look_right",true)-app_input_world("look_left",true))*turn)*RAD2DEG,
+        (mouse.y*settings->mouse_sensitivity +
+         (app_input_world("look_down",true)-app_input_world("look_up",true))*turn)*RAD2DEG,
+        -app_input_world("roll_left",true)*turn*RAD2DEG
+    };
+    if (IsGamepadAvailable(0)) {
+        rotation.x+=GetGamepadAxisMovement(0,GAMEPAD_AXIS_RIGHT_X)*2*settings->mouse_sensitivity*RAD2DEG;
+        rotation.y+=GetGamepadAxisMovement(0,GAMEPAD_AXIS_RIGHT_Y)*2*settings->mouse_sensitivity*RAD2DEG;
+        float x=GetGamepadAxisMovement(0,GAMEPAD_AXIS_LEFT_X), y=GetGamepadAxisMovement(0,GAMEPAD_AXIS_LEFT_Y);
+        if (x<=-0.25f) movement.y-=step;
+        if (x>=0.25f) movement.y+=step;
+        if (y<=-0.25f) movement.x+=step;
+        if (y>=0.25f) movement.x-=step;
+    }
+    UpdateCameraPro(&app->camera,movement,rotation,0.0f);
 
     World *world = game_session_world(app->session);
     constrain_camera(app, world);
@@ -1050,7 +1071,7 @@ static VoxelHit update_world(GuiApp *app)
     double camera_z = floor((double)app->camera.position.z + 0.5);
     if (!isfinite(camera_x) || !isfinite(camera_z) || camera_x < (double)INT32_MIN+16 ||
         camera_x > (double)INT32_MAX-16 || camera_z < (double)INT32_MIN+16 || camera_z > (double)INT32_MAX-16 ||
-        world_stream(world,(BlockPos){(int)camera_x,0,(int)camera_z},5) != RS_OK) {
+        world_stream(world,(BlockPos){(int)camera_x,0,(int)camera_z},app_config_current()->stream_radius) != RS_OK) {
         snprintf(app->message,sizeof(app->message),"Cannot stream world chunks");
         app->fatal_error = true; app->running = false;
         return hit;
@@ -1165,7 +1186,7 @@ static VoxelHit update_world(GuiApp *app)
 
 static void update_inventory(GuiApp *app)
 {
-    if (IsKeyPressed(KEY_E) || IsKeyPressed(KEY_ESCAPE)) {
+    if (app_input_world("inventory",false) || IsKeyPressed(KEY_ESCAPE)) {
         app->screen = GUI_WORLD;
         capture_mouse(app);
         return;
@@ -1329,7 +1350,7 @@ static void update_barrel(GuiApp *app)
                  "Barrel is no longer available");
         return;
     }
-    if (IsKeyPressed(KEY_E) || IsKeyPressed(KEY_ESCAPE)) {
+    if (app_input_world("inventory",false) || IsKeyPressed(KEY_ESCAPE)) {
         close_barrel(app);
         return;
     }
@@ -1365,7 +1386,7 @@ static void update_container(GuiApp *app)
     World *world = game_session_world(app->session);
     BlockId id = app->screen == GUI_DROPPER ? BLOCK_DROPPER : BLOCK_HOPPER;
     if (world_get(world, app->container_pos).id != id ||
-        IsKeyPressed(KEY_E) || IsKeyPressed(KEY_ESCAPE)) {
+        app_input_world("inventory",false) || IsKeyPressed(KEY_ESCAPE)) {
         app->screen = GUI_WORLD;
         capture_mouse(app);
         return;
@@ -1833,7 +1854,11 @@ static bool initialize(GuiApp *app, WorldSessionManager *world_sessions)
     snprintf(app->message, sizeof(app->message),
              "Create a world or load an existing .mcw file");
 
-    unsigned int window_flags = FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT;
+    bool config_ok=app_config_init();
+    if (!config_ok) fprintf(stderr,"%s\n",app_config_error());
+    const AppSettings *settings=app_config_current();
+    unsigned int window_flags = FLAG_WINDOW_RESIZABLE;
+    if (settings->vsync) window_flags |= FLAG_VSYNC_HINT;
 #if defined(__APPLE__)
     window_flags |= FLAG_WINDOW_HIGHDPI;
 #endif
@@ -1841,7 +1866,8 @@ static bool initialize(GuiApp *app, WorldSessionManager *world_sessions)
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "mcmux");
     SetWindowMinSize(1000, 650);
     SetExitKey(KEY_NULL);
-    SetTargetFPS(60);
+    SetTargetFPS(settings->fps_limit);
+    app->config_revision=app_config_revision();
     if (!ui_font_init()) return false;
     app->title_background = LoadTexture(gui_asset_path("res/gui/title_background.png"));
     if (!app->title_background.id) {
@@ -1878,6 +1904,10 @@ static bool initialize(GuiApp *app, WorldSessionManager *world_sessions)
     app->window_height = GetScreenHeight();
     app->window_text_width = WORKSPACE_TEXT_WIDTH;
     refresh_saves(app);
+    if (!config_ok) {
+        snprintf(app->pane_message,sizeof(app->pane_message),"Configuration error; using defaults (see mc-output)");
+        workspace_output_message(app->output,app_config_error(),true);
+    }
     return true;
 }
 
@@ -2086,7 +2116,7 @@ static bool prepare_gui_view(GuiApp *app)
     }
     if (app->session && app->screen != GUI_TITLE &&
         app->screen != GUI_SAVE_ERROR)
-        world_msaa_prepare(&app->world_msaa, pixel_width, pixel_height);
+        world_msaa_prepare(&app->world_msaa, pixel_width, pixel_height, app_config_current()->msaa_samples);
     else world_msaa_destroy(&app->world_msaa);
     gui_view_set(box, width, height);
     return true;
@@ -2107,7 +2137,7 @@ static void apply_pane_focus(GuiApp *app)
             app->screen = GUI_WORLD;
         release_mouse(app);
     } else if (app->session && app->screen == GUI_WORLD) capture_mouse(app);
-    while (GetCharPressed() != 0) {}
+    while (app_input_char() != 0) {}
 }
 
 static int split_editor_pane(GuiApp *app, bool split_x)
@@ -2290,87 +2320,87 @@ static bool update_workspace_pointer(GuiApp *app)
     return false;
 }
 
-/* Prefix keys are consumed before either frontend receives this frame's input. */
+static void reload_user_config(GuiApp *app)
+{
+    for (int i=0;i<WORKSPACE_TEXT_LIMIT;++i) if (workspace_editor_config_dirty(app->editors[i])) {
+        pane_notice(app,"Save configuration with :w before reloading");
+        return;
+    }
+    if (!app_config_reload()) {
+        pane_notice(app,"Configuration error; keeping previous settings (see mc-output)");
+        workspace_output_message(app->output,app_config_error(),true);
+    } else pane_notice(app,"Configuration reloaded from disk");
+}
+
+static void open_user_config(GuiApp *app)
+{
+    if (!app_config_ensure_file()) {
+        pane_notice(app,"Cannot open configuration (see mc-output)");
+        workspace_output_message(app->output,app_config_error(),true); return;
+    }
+    int pane=app->workspace.focus;
+    if (pane<=0 || pane==app->output_pane || !app->editors[pane-1]) {
+        pane=0;
+        for (int i=0;i<WORKSPACE_TEXT_LIMIT;++i) if (app->editors[i]) { pane=i+1;break; }
+        if (!pane) pane=split_editor_pane(app,true);
+    }
+    if (pane<=0) return;
+    app->workspace.focus=pane;
+    (void)workspace_editor_command(app->editors[pane-1],"config",prepare_program_run,app);
+    apply_pane_focus(app);
+}
+
+/* Workspace chords consume the frame before any editor or world receives it. */
 static bool update_pane_keys(GuiApp *app)
 {
-    bool control = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-    if (control && IsKeyPressed(KEY_B)) {
-        cancel_workspace_pointer(app);
-        app->pane_help = false;
-        app->pane_prefix = true;
-        app->pane_message[0] = '\0';
-        release_mouse(app);
-        while (GetCharPressed() != 0) {}
-        return true;
+    if (app_input_leader()) {
+        cancel_workspace_pointer(app); app->pane_help=false; app->pane_prefix=true;
+        app->pane_message[0]=0;
+        int timeout=app_config_current()->leader_timeout_ms;
+        app->prefix_deadline=timeout ? GetTime()+timeout/1000.0 : 0.0;
+        release_mouse(app); app_input_discard(); return true;
     }
     if (app->pane_help) {
-        if (IsKeyPressed(KEY_ESCAPE) || IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_Q)) {
-            app->pane_help = false;
-            apply_pane_focus(app);
+        app->help_scroll-=(int)(GetMouseWheelMove()*3);
+        if (app->help_scroll<0) app->help_scroll=0;
+        if (IsKeyPressed(KEY_ESCAPE)||IsKeyPressed(KEY_ENTER)||IsKeyPressed(KEY_Q)) {
+            app->pane_help=false; apply_pane_focus(app);
         }
-        while (GetCharPressed() != 0) {}
-        return true;
+        app_input_discard(); return true;
     }
-    if (!app->pane_prefix) return false;
-    if (IsKeyPressed(KEY_ESCAPE)) {
-        cancel_workspace_pointer(app);
-        app->pane_prefix = false;
-        apply_pane_focus(app);
-        return true;
+    if (app->pane_prefix && (IsKeyPressed(KEY_ESCAPE) ||
+        (app->prefix_deadline>0 && GetTime()>=app->prefix_deadline))) {
+        app->pane_prefix=false; cancel_workspace_pointer(app); apply_pane_focus(app);
+        app_input_discard(); return true;
     }
-    WorkspaceDirection direction;
-    bool arrow = true;
-    if (IsKeyPressed(KEY_LEFT)) direction = WORKSPACE_LEFT;
-    else if (IsKeyPressed(KEY_RIGHT)) direction = WORKSPACE_RIGHT;
-    else if (IsKeyPressed(KEY_UP)) direction = WORKSPACE_UP;
-    else if (IsKeyPressed(KEY_DOWN)) direction = WORKSPACE_DOWN;
-    else { direction = WORKSPACE_LEFT; arrow = false; }
-    bool acted = arrow;
-    if (arrow) {
-        if (control) {
-            bool resized = workspace_layout_resize(&app->workspace, direction, 24,
-                GetScreenWidth(), workspace_height(app));
-            pane_notice(app, resized ? "Text divider moved" : "No movable text divider in this direction");
-        } else (void)workspace_layout_focus(&app->workspace, direction,
-            GetScreenWidth(), workspace_height(app));
-    }
-    int character;
-    while ((character = GetCharPressed()) != 0) {
-        if (acted) continue;
-        acted = true;
-        switch (character) {
-        case '%': (void)split_editor_pane(app, true); break;
-        case '"': (void)split_editor_pane(app, false); break;
-        case 'o': workspace_layout_next(&app->workspace); break;
-        case 'c': (void)open_output_pane(app); break;
-        case 'H': case 'J': case 'K': case 'L': {
-            WorkspaceDirection move = character == 'H' ? WORKSPACE_LEFT :
-                character == 'L' ? WORKSPACE_RIGHT : character == 'K' ? WORKSPACE_UP : WORKSPACE_DOWN;
-            bool resized = workspace_layout_resize(&app->workspace, move, 24,
-                GetScreenWidth(), workspace_height(app));
-            pane_notice(app, resized ? "Text divider moved" : "No movable text divider");
-            break;
-        }
-        case 'z':
-            if (!workspace_layout_zoom(&app->workspace))
-                pane_notice(app, "GUI size is fixed; zoom applies to text panes");
-            else pane_notice(app, "Text-pane zoom toggled");
-            break;
-        case 'x': (void)close_pane(app, false); break;
-        case 'g':
-            if (app->program_active)
-                pane_notice(app, "mc-gui is paused during :make/:run/:model; stop the task with mc-output Ctrl+C");
-            else workspace_layout_show_gui(&app->workspace);
-            break;
-        case '?': app->pane_help = true; break;
-        default: pane_notice(app, "Unknown pane key"); break;
-        }
-    }
-    if (acted) {
-        app->pane_prefix = false;
-        if (!app->pane_help) apply_pane_focus(app);
-    }
-    return true;
+    const char *action=app_input_workspace(app->pane_prefix);
+    if (!action) return app->pane_prefix;
+    if (!strcmp(action,"split_horizontal")) (void)split_editor_pane(app,true);
+    else if (!strcmp(action,"split_vertical")) (void)split_editor_pane(app,false);
+    else if (!strncmp(action,"focus_",6) || !strncmp(action,"resize_",7)) {
+        bool resize=!strncmp(action,"resize_",7);
+        const char *direction=action+(resize ? 7 : 6);
+        WorkspaceDirection d=!strcmp(direction,"left") ? WORKSPACE_LEFT :
+            !strcmp(direction,"right") ? WORKSPACE_RIGHT :
+            !strcmp(direction,"up") ? WORKSPACE_UP : WORKSPACE_DOWN;
+        if (resize) {
+            bool changed=workspace_layout_resize(&app->workspace,d,24,GetScreenWidth(),workspace_height(app));
+            pane_notice(app,changed ? "Text divider moved" : "No movable text divider");
+        } else (void)workspace_layout_focus(&app->workspace,d,GetScreenWidth(),workspace_height(app));
+    } else if (!strcmp(action,"next_pane")) workspace_layout_next(&app->workspace);
+    else if (!strcmp(action,"output")) (void)open_output_pane(app);
+    else if (!strcmp(action,"zoom")) {
+        if (!workspace_layout_zoom(&app->workspace)) pane_notice(app,"Zoom applies to text panes");
+    } else if (!strcmp(action,"close_pane")) (void)close_pane(app,false);
+    else if (!strcmp(action,"world")) {
+        if (app->program_active) pane_notice(app,"Stop the active C task before returning to mc-gui");
+        else workspace_layout_show_gui(&app->workspace);
+    } else if (!strcmp(action,"help")) { app->pane_help=true; app->help_scroll=0; }
+    else if (!strcmp(action,"config")) open_user_config(app);
+    else if (!strcmp(action,"reload_config")) reload_user_config(app);
+    app->pane_prefix=false;
+    if (!app->pane_help) apply_pane_focus(app);
+    app_input_discard(); return true;
 }
 
 static void update_text_pane(GuiApp *app)
@@ -2401,6 +2431,19 @@ static void update_text_pane(GuiApp *app)
 static VoxelHit update_workspace_input(GuiApp *app)
 {
     VoxelHit hit = {0};
+    app_input_frame();
+    if (app->config_revision!=app_config_revision()) {
+        const AppSettings *settings=app_config_current();
+        if (settings->vsync) SetWindowState(FLAG_VSYNC_HINT);
+        else ClearWindowState(FLAG_VSYNC_HINT);
+        SetTargetFPS(settings->fps_limit);
+        app->camera.fovy=settings->fov;
+        world_msaa_destroy(&app->world_msaa);
+        cancel_workspace_pointer(app);
+        for (int i=0;i<WORKSPACE_TEXT_LIMIT;++i) workspace_editor_refresh(app->editors[i]);
+        app->pane_prefix=false; app->pane_help=false;
+        app->config_revision=app_config_revision();
+    }
     workspace_output_poll(app->output);
     sync_program_activity(app);
     workspace_code_poll(app->code);
@@ -2445,43 +2488,25 @@ static VoxelHit update_workspace_input(GuiApp *app)
     return hit;
 }
 
-static void draw_pane_help(void)
+static void draw_pane_help(GuiApp *app)
 {
-    const char *lines[] = {
-        "Workspace keys - press Ctrl+b, release, then:",
-        "%                 Split mc-nvim left / right",
-        "\"                 Split mc-nvim top / bottom",
-        "Arrow             Focus pane in that direction",
-        "o                 Focus next pane",
-        "c                 Open / focus mc-output",
-        "Ctrl+Arrow/HJKL   Move nearest text divider",
-        "z                 Zoom / restore text area",
-        "x                 Close focused pane",
-        "g                 Restore and focus mc-gui",
-        "?                 Show this help",
-        "Esc               Cancel prefix / close help",
-        "",
-        "mc-nvim: v/V select, y copy, d delete, dd/yy line, D to end, p/P paste",
-        "mc-nvim: i/a insert, Esc normal, :Ex, :e path, :w",
-        "mc-nvim: :make builds the current C file; :run builds and runs it",
-        "mc-nvim: :model exports C queries using the file's // mcmux-model: line",
-        "mc-nvim: gd definition, gD declaration, K information, Ctrl+o/Ctrl+t back",
-        "Mouse: Ctrl+b releases pointer; click a pane, drag text or dividers",
-        "Mouse: wheel scrolls hovered pane; i enters Insert, Esc returns Normal",
-        "mc-nvim: :q, :q!, :wq; Arrows/hjkl move; :! runs an external command",
-        "mc-output: PgUp/PgDn scroll, End follow, Ctrl+C stop command",
-        "mc-gui: / and // open world and simulation commands."
-    };
-    int width = GetScreenWidth() - 80;
-    if (width > 800) width = 800;
-    int height = (int)(sizeof(lines)/sizeof(lines[0]))*26 + 36;
-    int x = (GetScreenWidth() - width)/2, y = (GetScreenHeight() - height)/2;
-    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), (Color){0, 0, 0, 170});
-    DrawRectangle(x, y, width, height, (Color){22, 27, 36, 255});
-    DrawRectangleLines(x, y, width, height, (Color){172, 143, 255, 255});
-    BeginScissorMode(x, y, width, height);
-    for (size_t i = 0; i < sizeof(lines)/sizeof(lines[0]); ++i)
-        ui_text_draw(lines[i], x + 18, y + 18 + (int)i*26, 18, RAYWHITE);
+    size_t count=app_config_action_count(APP_WORKSPACE);
+    int width=GetScreenWidth()-80; if (width>1100) width=1100;
+    int rows=(GetScreenHeight()-150)/24; if (rows<1) rows=1;
+    if ((size_t)rows>count) rows=(int)count;
+    int maximum=(int)count-rows;
+    if (app->help_scroll>maximum) app->help_scroll=maximum;
+    int height=rows*24+80,x=(GetScreenWidth()-width)/2,y=(GetScreenHeight()-height)/2;
+    DrawRectangle(0,0,GetScreenWidth(),GetScreenHeight(),(Color){0,0,0,170});
+    DrawRectangle(x,y,width,height,(Color){22,27,36,255});
+    BeginScissorMode(x,y,width,height);
+    ui_text_draw("Workspace bindings | wheel scroll | Esc close",x+16,y+12,18,RAYWHITE);
+    for (int i=0;i<rows;++i) {
+        const char *name=app_config_action_name(APP_WORKSPACE,(size_t)(i+app->help_scroll));
+        char keys[256],line[360]; app_config_describe(APP_WORKSPACE,name,keys,sizeof(keys));
+        snprintf(line,sizeof(line),"%-20s %s",name,keys);
+        ui_text_draw(line,x+16,y+43+i*24,16,RAYWHITE);
+    }
     EndScissorMode();
 }
 
@@ -2548,7 +2573,7 @@ static void draw_workspace(GuiApp *app, VoxelHit hit)
             state[0] && message[0] ? " | " : "", message), 8, y + 5, 16, RAYWHITE);
         EndScissorMode();
     }
-    if (app->pane_help) draw_pane_help();
+    if (app->pane_help) draw_pane_help(app);
 }
 
 int gui_run(WorldSessionManager *world_sessions)

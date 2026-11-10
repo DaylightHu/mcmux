@@ -1,5 +1,7 @@
 #include "gui_view.h"
 #include "hotbar.h"
+#include "app_config.h"
+#include <stdio.h>
 
 enum {
     HOTBAR_SLOT_SIZE = 48,
@@ -52,15 +54,9 @@ void hotbar_update(Hotbar *hotbar)
 {
     if (!hotbar) return;
 
-    static const int number_keys[HOTBAR_SLOT_COUNT] = {
-        KEY_ONE, KEY_TWO, KEY_THREE, KEY_FOUR, KEY_FIVE,
-        KEY_SIX, KEY_SEVEN, KEY_EIGHT, KEY_NINE
-    };
-    for (int slot = 0; slot < HOTBAR_SLOT_COUNT; ++slot) {
-        if (IsKeyPressed(number_keys[slot])) {
-            hotbar->selected_slot = slot;
-            return;
-        }
+    for (int slot=0;slot<HOTBAR_SLOT_COUNT;++slot) {
+        char action[16]; snprintf(action,sizeof(action),"slot_%d",slot+1);
+        if (app_input_world(action,false)) { hotbar->selected_slot=slot; return; }
     }
 
     if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {

@@ -3,6 +3,7 @@
 #endif
 #include "workspace_output.h"
 #include "ui_font.h"
+#include "app_config.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -24,7 +25,9 @@ extern char **environ;
 #endif
 
 enum { OUTPUT_LINES=2048, OUTPUT_LINE_LENGTH=1024, OUTPUT_READ_BUDGET=65536,
-       OUTPUT_FONT_SIZE=20, OUTPUT_ROW_HEIGHT=24, OUTPUT_HEADER_HEIGHT=25 };
+       OUTPUT_HEADER_HEIGHT=25 };
+#define OUTPUT_FONT_SIZE (app_config_current()->output_font_size)
+#define OUTPUT_ROW_HEIGHT (OUTPUT_FONT_SIZE + 4)
 typedef struct { char text[OUTPUT_LINE_LENGTH]; bool error; } OutputLine;
 struct WorkspaceOutput {
     OutputLine lines[OUTPUT_LINES];
@@ -316,7 +319,7 @@ static bool start_process(WorkspaceOutput *output,const char *command,
     void *source,WorkspaceOutputReceiver receiver,char *error,size_t capacity)
 {
     if (!output || output->running) {
-        snprintf(error,capacity,"an external command is already running; use mc-output Ctrl+C to stop it");
+        snprintf(error,capacity,"an external command is already running; stop the task in mc-output");
         return false;
     }
     if (!launch_process(output,command,arguments,directory,error,capacity)) return false;
@@ -421,27 +424,28 @@ void workspace_output_poll(WorkspaceOutput *output)
 void workspace_output_update(WorkspaceOutput *output)
 {
     if (!output) return;
-    bool control=IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-    if (control && IsKeyPressed(KEY_C)) workspace_output_cancel(output);
-    if (IsKeyPressed(KEY_PAGE_UP)) output->scroll+=10;
-    if (IsKeyPressed(KEY_PAGE_DOWN)) output->scroll=output->scroll>10 ? output->scroll-10 : 0;
-    if (IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP) || IsKeyPressed(KEY_K)) ++output->scroll;
-    if (IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN) || IsKeyPressed(KEY_J))
+    app_input_scope(APP_OUTPUT);
+    bool control=app_input_down(KEY_LEFT_CONTROL) || app_input_down(KEY_RIGHT_CONTROL);
+    if (control && app_input_pressed(KEY_C)) workspace_output_cancel(output);
+    if (app_input_pressed(KEY_PAGE_UP)) output->scroll+=10;
+    if (app_input_pressed(KEY_PAGE_DOWN)) output->scroll=output->scroll>10 ? output->scroll-10 : 0;
+    if (app_input_pressed(KEY_UP) || app_input_repeat(KEY_UP) || app_input_pressed(KEY_K)) ++output->scroll;
+    if (app_input_pressed(KEY_DOWN) || app_input_repeat(KEY_DOWN) || app_input_pressed(KEY_J))
         output->scroll=output->scroll ? output->scroll-1 : 0;
-    if (IsKeyPressed(KEY_HOME)) output->scroll=scroll_limit(output);
-    if (IsKeyPressed(KEY_END)) output->scroll=0;
-    if (IsKeyPressed(KEY_LEFT) || IsKeyPressedRepeat(KEY_LEFT)) output->left=output->left>4 ? output->left-4 : 0;
-    if (IsKeyPressed(KEY_RIGHT) || IsKeyPressedRepeat(KEY_RIGHT)) output->left+=4;
+    if (app_input_pressed(KEY_HOME)) output->scroll=scroll_limit(output);
+    if (app_input_pressed(KEY_END)) output->scroll=0;
+    if (app_input_pressed(KEY_LEFT) || app_input_repeat(KEY_LEFT)) output->left=output->left>4 ? output->left-4 : 0;
+    if (app_input_pressed(KEY_RIGHT) || app_input_repeat(KEY_RIGHT)) output->left+=4;
     if (output->left>OUTPUT_LINE_LENGTH) output->left=OUTPUT_LINE_LENGTH;
     clamp_scroll(output);
-    while (GetCharPressed()!=0) {}
+    while (app_input_char()!=0) {}
 }
 
 void workspace_output_scroll(WorkspaceOutput *output, Vector2 wheel)
 {
     if (!output) return;
-    output->wheel_remainder.x += wheel.x*3;
-    output->wheel_remainder.y += wheel.y*3;
+    output->wheel_remainder.x += wheel.x*app_config_current()->scroll_lines;
+    output->wheel_remainder.y += wheel.y*app_config_current()->scroll_lines;
     int x=(int)output->wheel_remainder.x, y=(int)output->wheel_remainder.y;
     output->wheel_remainder.x-=x; output->wheel_remainder.y-=y;
     if (y>0) output->scroll+=(size_t)y;
@@ -483,7 +487,11 @@ void workspace_output_draw(WorkspaceOutput *output,Rectangle box,int pane,bool f
             OUTPUT_FONT_SIZE,line && line->error ? (Color){255,128,128,255} : (Color){211,222,231,255});
     }
     DrawRectangle((int)box.x,bottom,(int)box.width,OUTPUT_HEADER_HEIGHT,(Color){44,38,63,255});
-    ui_text_draw("PgUp/PgDn scroll | End follow | Ctrl+C stop",(int)box.x+7,bottom+5,14,accent);
+    char stop[128],follow[128],footer[320];
+    app_config_describe(APP_OUTPUT,"cancel",stop,sizeof(stop));
+    app_config_describe(APP_OUTPUT,"end",follow,sizeof(follow));
+    snprintf(footer,sizeof(footer),"%s follow | %s stop",follow,stop);
+    ui_text_draw(footer,(int)box.x+7,bottom+5,14,accent);
     EndScissorMode();
     DrawRectangleLinesEx(box,focused ? 2 : 1,accent);
 }

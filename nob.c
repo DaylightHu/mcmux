@@ -20,6 +20,7 @@
 
 #define RAYLIB_DIR "third_party/raylib"
 #define RAYLIB_SRC RAYLIB_DIR "/src"
+#define TOML_DIR "third_party/tomlc17"
 #define RAYLIB_CONFIG "raylib_config.h"
 #define MAC_APP "build/macos/mcmux.app"
 #define MAC_APP_BINARY MAC_APP "/Contents/MacOS/machinecraft_gui"
@@ -75,6 +76,8 @@ static const char *common_sources[] = {
 };
 
 static const char *gui_sources[] = {
+    TOML_DIR "/tomlc17.c",
+    "src/frontend/app_config.c",
     "src/gui_main.c",
     "src/command_completion.c",
     "src/edit_command.c",
@@ -429,9 +432,9 @@ static bool collect_vendor_files(Files *files)
 {
     if (!nob_mkdir_if_not_exists("build") ||
         !nob_mkdir_if_not_exists("build/vendor")) return false;
-    if (nob_file_exists(RAYLIB_DIR "/.git")) {
+    if (nob_file_exists(RAYLIB_DIR "/.git") || nob_file_exists(TOML_DIR "/.git")) {
         nob_log(NOB_ERROR,
-            RAYLIB_DIR "/.git makes raylib a nested repository; move or remove that metadata first");
+            "vendored libraries must not contain nested .git metadata");
         return false;
     }
     if (!verify_raylib_version()) return false;
@@ -455,13 +458,17 @@ static bool collect_vendor_files(Files *files)
         if (!parse_dependency_file(scans[scan].output, files)) return false;
     }
 
+    files_add(files, TOML_DIR "/tomlc17.c");
+    files_add(files, TOML_DIR "/tomlc17.h");
+    files_add(files, TOML_DIR "/LICENSE");
+    files_add(files, TOML_DIR "/UPSTREAM");
     files_add(files, RAYLIB_DIR "/LICENSE");
     files_add(files, RAYLIB_SRC "/external/glfw/LICENSE.md");
     files_sort(files);
 
     for (size_t index = 0; index < files->count; ++index) {
         if (!nob_file_exists(files->items[index])) {
-            nob_log(NOB_ERROR, "required raylib file is missing: %s", files->items[index]);
+            nob_log(NOB_ERROR, "required vendored file is missing: %s", files->items[index]);
             return false;
         }
     }
@@ -484,6 +491,7 @@ static bool collect_project_headers(Files *headers)
     if (!nob_walk_dir("src", collect_header, .data = headers)) return false;
     files_add(headers, "nob.c");
     files_add(headers, RAYLIB_CONFIG);
+    files_add(headers, TOML_DIR "/tomlc17.h");
     files_add(headers, RAYLIB_SRC "/raylib.h");
     files_add(headers, RAYLIB_SRC "/raymath.h");
     files_add(headers, RAYLIB_SRC "/rlgl.h");
@@ -727,7 +735,7 @@ static bool parse_nul_paths(const char *path, Files *files)
 static bool verify_tracked_vendor(const Files *required)
 {
     Nob_Cmd command = {0};
-    nob_cmd_append(&command, "git", "ls-files", "-z", "--", RAYLIB_DIR);
+    nob_cmd_append(&command, "git", "ls-files", "-z", "--", RAYLIB_DIR, TOML_DIR);
     if (!nob_cmd_run(&command, .stdout_path = "build/vendor/tracked.z")) return false;
 
     Files tracked = {0};
@@ -736,14 +744,14 @@ static bool verify_tracked_vendor(const Files *required)
     bool valid = true;
     for (size_t index = 0; index < required->count; ++index) {
         if (!files_contains(&tracked, required->items[index])) {
-            nob_log(NOB_ERROR, "required raylib file is not tracked: %s",
+            nob_log(NOB_ERROR, "required vendored file is not tracked: %s",
                     required->items[index]);
             valid = false;
         }
     }
     for (size_t index = 0; index < tracked.count; ++index) {
         if (!files_contains(required, tracked.items[index])) {
-            nob_log(NOB_ERROR, "unneeded raylib file is tracked: %s",
+            nob_log(NOB_ERROR, "unneeded vendored file is tracked: %s",
                     tracked.items[index]);
             valid = false;
         }
@@ -757,7 +765,7 @@ static bool sync_vendor_index(const Files *required)
 {
     Nob_Cmd command = {0};
     nob_cmd_append(&command,
-        "git", "rm", "-r", "--cached", "-f", "--ignore-unmatch", "--", RAYLIB_DIR);
+        "git", "rm", "-r", "--cached", "-f", "--ignore-unmatch", "--", RAYLIB_DIR, TOML_DIR);
     if (!nob_cmd_run(&command, .stdout_path = "build/vendor/git-rm.log")) return false;
 
     nob_cmd_append(&command, "git", "add", "-f", "--");
@@ -841,7 +849,7 @@ static bool precommit(void)
     if (!verify_index_build()) goto cleanup;
 
     nob_log(NOB_INFO,
-        "precommit passed: %zu raylib 6.0 files are staged and the index-only tree builds",
+        "precommit passed: %zu required raylib/TOML files are staged and the index-only tree builds",
         required.count);
     nob_log(NOB_INFO, "review git status, then create your commit");
     result = true;
@@ -1164,8 +1172,8 @@ static void print_help(const char *program)
     printf("  build        Build the GUI (default)\n");
     printf("  gui          Build only the GUI\n");
     printf("  run          Build and run the GUI from the repository root\n");
-    printf("  vendor-list  Print the raylib files required by macOS and Windows\n");
-    printf("  precommit    Stage the exact raylib set and verify an index-only build\n");
+    printf("  vendor-list  Print vendored files required by macOS and Windows\n");
+    printf("  precommit    Stage required raylib/TOML files and verify an index-only build\n");
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
     printf("  benchmark    Generate C queries, compile and run the full redstone suite\n");
     printf("               --compare-modules: one-command baseline/current module comparison\n");
@@ -1232,7 +1240,7 @@ int main(int argc, char **argv)
         for (size_t index = 0; index < required.count; ++index) {
             puts(required.items[index]);
         }
-        nob_log(NOB_INFO, "%zu files are required", required.count);
+        nob_log(NOB_INFO, "%zu vendored files are required", required.count);
         files_free(&required);
         return 0;
     }

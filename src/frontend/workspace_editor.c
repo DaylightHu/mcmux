@@ -6,6 +6,7 @@
 #include "workspace_output.h"
 #include "workspace_code.h"
 #include "ui_font.h"
+#include "app_config.h"
 #include "rs/structure.h"
 
 #include <ctype.h>
@@ -46,14 +47,15 @@ enum {
     EDITOR_MESSAGE_LIMIT = 32,
     EDITOR_MESSAGE_LENGTH = 768,
     EDITOR_COMMAND_CAPACITY = 520,
-    EDITOR_FONT_SIZE = 20,
-    EDITOR_ROW_HEIGHT = 24,
     EDITOR_HEADER_HEIGHT = 25,
-    EDITOR_STATUS_HEIGHT = 25,
     EDITOR_HEADER_FONT_SIZE = 16,
-    EDITOR_TAB_WIDTH = 4,
     EDITOR_DRAW_CAPACITY = 8192
 };
+
+#define EDITOR_FONT_SIZE (app_config_current()->editor_font_size)
+#define EDITOR_ROW_HEIGHT (EDITOR_FONT_SIZE + 4)
+#define EDITOR_STATUS_HEIGHT (EDITOR_FONT_SIZE + 5)
+#define EDITOR_TAB_WIDTH ((size_t)app_config_current()->tab_width)
 
 typedef enum {
     EDITOR_NORMAL,
@@ -133,7 +135,7 @@ static void enter_command_mode(WorkspaceEditor *editor, EditorMode return_mode);
 
 static bool editor_key(int code)
 {
-    return IsKeyPressed(code) || IsKeyPressedRepeat(code);
+    return app_input_pressed(code) || app_input_repeat(code);
 }
 
 static bool line_reserve(EditorLine *line, size_t needed)
@@ -1738,7 +1740,7 @@ static bool project_task_tool(WorkspaceEditor *editor,const EditorBuffer *buffer
     }
     if (workspace_output_is_running(editor->output)) {
         workspace_editor_message(editor,
-            "a command is already running; use mc-output Ctrl+C to stop it",true);
+            "a command is already running; stop the task in mc-output",true);
         return false;
     }
     char directory[EDITOR_PATH_CAPACITY];
@@ -2011,7 +2013,17 @@ static WorkspaceEditorAction execute_editor_command(WorkspaceEditor *editor,
     if (*argument) *argument++ = '\0';
     argument = skip_space(argument);
     if (!*command) return action;
-    if (strcmp(command, "Ex") == 0 || strcmp(command, "Explore") == 0) {
+    if (strcmp(command,"config")==0) {
+        if (*argument) workspace_editor_message(editor,"usage: :config",true);
+        else if (!app_config_ensure_file()) workspace_editor_message(editor,app_config_error(),true);
+        else (void)editor_open_file(editor,app_config_path());
+    } else if (strcmp(command,"reloadconfig")==0) {
+        if (*argument) workspace_editor_message(editor,"usage: :reloadconfig",true);
+        else if (workspace_editor_config_dirty(editor))
+            workspace_editor_message(editor,"save configuration with :w before :reloadconfig",true);
+        else if (!app_config_reload()) workspace_editor_message(editor,app_config_error(),true);
+        else workspace_editor_message(editor,"Configuration reloaded from disk",false);
+    } else if (strcmp(command, "Ex") == 0 || strcmp(command, "Explore") == 0) {
         (void)browser_open(editor, argument);
     } else if (strcmp(command, "e") == 0) {
         if (!*argument) workspace_editor_message(editor, "usage: :e path", true);
@@ -2060,45 +2072,82 @@ static WorkspaceEditorAction execute_editor_command(WorkspaceEditor *editor,
     return action;
 }
 
+bool workspace_editor_config_dirty(const WorkspaceEditor *editor)
+{
+    if (!editor) return false;
+    for (size_t i=0;i<editor->buffer_count;++i) {
+        const EditorBuffer *b=editor->buffers[i];
+        if (b->named && b->dirty && paths_equal(b->path,app_config_path())) return true;
+    }
+    return false;
+}
+
+WorkspaceEditorAction workspace_editor_command(WorkspaceEditor *editor,const char *command,
+    WorkspaceEditorPrepareRun prepare_run,void *context)
+{
+    if (!editor || !command) return WORKSPACE_EDITOR_CONTINUE;
+    if (strlen(command)>=sizeof(editor->command)) {
+        workspace_editor_message(editor,"editor command is too long",true);
+        return WORKSPACE_EDITOR_CONTINUE;
+    }
+    close_code_info(editor);
+    editor->pending_operator=0;
+    if (editor->mode==EDITOR_COMMAND) editor->mode=editor->command_previous_mode;
+    snprintf(editor->command,sizeof(editor->command),"%s",command);
+    editor->command_length=strlen(command); editor->command_cursor=editor->command_length;
+    WorkspaceEditorAction result=execute_editor_command(editor,prepare_run,context);
+    editor->command[0]=0; editor->command_length=editor->command_cursor=0;
+    editor->follow_cursor=true;
+    return result;
+}
+
+void workspace_editor_refresh(WorkspaceEditor *editor)
+{
+    if (!editor) return;
+    workspace_editor_cancel_pointer(editor);
+    editor->wheel_remainder=(Vector2){0}; editor->follow_cursor=true;
+    editor->pending_operator=0;
+}
+
 static void update_normal(WorkspaceEditor *editor)
 {
     EditorBuffer *buffer = current_buffer(editor);
     if (!buffer) return;
-    if (IsKeyPressed(KEY_ESCAPE)) {
+    if (app_input_pressed(KEY_ESCAPE)) {
         if (editor->code_pending) {
             workspace_code_detach(editor->code,editor); editor->code_pending=false;
             editor->messages_visible=false;
         }
         editor->mode=EDITOR_NORMAL; editor->pending_operator=0;
-        while (GetCharPressed()!=0) {}
+        while (app_input_char()!=0) {}
         return;
     }
-    bool control=IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
-        IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+    bool control=app_input_down(KEY_LEFT_CONTROL) || app_input_down(KEY_RIGHT_CONTROL) ||
+        app_input_down(KEY_LEFT_SUPER) || app_input_down(KEY_RIGHT_SUPER);
     if (control) {
-        if (!visual_mode(editor) && (IsKeyPressed(KEY_O) || IsKeyPressed(KEY_T)))
+        if (!visual_mode(editor) && (app_input_pressed(KEY_O) || app_input_pressed(KEY_T)))
             jump_back(editor);
-        else if (!visual_mode(editor) && IsKeyPressed(KEY_RIGHT_BRACKET))
+        else if (!visual_mode(editor) && app_input_pressed(KEY_RIGHT_BRACKET))
             query_code(editor,CODE_DEFINITION);
-        else if (visual_mode(editor) && (IsKeyPressed(KEY_C) || IsKeyPressed(KEY_X)))
-            (void)operate_range(editor,selected_range(editor,buffer),IsKeyPressed(KEY_X));
-        else if (IsKeyPressed(KEY_V) && !visual_mode(editor))
+        else if (visual_mode(editor) && (app_input_pressed(KEY_C) || app_input_pressed(KEY_X)))
+            (void)operate_range(editor,selected_range(editor,buffer),app_input_pressed(KEY_X));
+        else if (app_input_pressed(KEY_V) && !visual_mode(editor))
             (void)paste_register(editor,false,true);
-        while (GetCharPressed()!=0) {}
+        while (app_input_char()!=0) {}
         return;
     }
-    if (IsKeyPressed(KEY_DELETE)) {
+    if (app_input_pressed(KEY_DELETE)) {
         if (visual_mode(editor)) (void)operate_range(editor,selected_range(editor,buffer),true);
         else if (buffer->lines[buffer->row].length) {
             EditorRange range={{buffer->row,buffer->column},
                 {buffer->row,utf8_next(&buffer->lines[buffer->row],buffer->column)},false};
             (void)operate_range(editor,range,true);
         }
-        while (GetCharPressed()!=0) {}
+        while (app_input_char()!=0) {}
         return;
     }
     bool moved = false, interacted = false;
-    bool shift=IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    bool shift=app_input_down(KEY_LEFT_SHIFT) || app_input_down(KEY_RIGHT_SHIFT);
     if (editor_key(KEY_LEFT) || (!shift && editor_key(KEY_H))) {
         EditorLine *line = &buffer->lines[buffer->row];
         if (buffer->column) buffer->column = utf8_previous(line, buffer->column);
@@ -2114,23 +2163,23 @@ static void update_normal(WorkspaceEditor *editor)
     } else if (editor_key(KEY_DOWN) || (!shift && editor_key(KEY_J))) {
         move_vertical(buffer, 1, false);
         interacted = true;
-    } else if (IsKeyPressed(KEY_HOME)) {
+    } else if (app_input_pressed(KEY_HOME)) {
         buffer->column = 0;
         moved = interacted = true;
-    } else if (IsKeyPressed(KEY_END)) {
+    } else if (app_input_pressed(KEY_END)) {
         buffer->column = normal_last_column(&buffer->lines[buffer->row]);
         moved = interacted = true;
-    } else if (IsKeyPressed(KEY_PAGE_UP)) {
+    } else if (app_input_pressed(KEY_PAGE_UP)) {
         for (int i = 0; i < 10; ++i) move_vertical(buffer, -1, false);
         interacted = true;
-    } else if (IsKeyPressed(KEY_PAGE_DOWN)) {
+    } else if (app_input_pressed(KEY_PAGE_DOWN)) {
         for (int i = 0; i < 10; ++i) move_vertical(buffer, 1, false);
         interacted = true;
     }
     if (moved) remember_column(buffer);
     if (interacted) editor->pending_operator=0;
     int character;
-    while ((character = GetCharPressed()) != 0) {
+    while ((character = app_input_char()) != 0) {
         if (character=='v' || character=='V') {
             EditorMode mode=character=='V' ? EDITOR_VISUAL_LINE : EDITOR_VISUAL;
             if (!visual_mode(editor)) {
@@ -2188,7 +2237,7 @@ static void update_normal(WorkspaceEditor *editor)
             editor->mode=EDITOR_INSERT;
             editor->messages_visible=false;
             remember_column(buffer);
-            while (GetCharPressed()!=0) {}
+            while (app_input_char()!=0) {}
             return;
         }
         if (character == ':') {
@@ -2203,18 +2252,18 @@ static void update_insert(WorkspaceEditor *editor)
 {
     EditorBuffer *buffer = current_buffer(editor);
     if (!buffer) return;
-    if (IsKeyPressed(KEY_ESCAPE)) {
+    if (app_input_pressed(KEY_ESCAPE)) {
         EditorLine *line = &buffer->lines[buffer->row];
         if (buffer->column) buffer->column = utf8_previous(line, buffer->column);
         editor->mode = EDITOR_NORMAL;
         clamp_cursor(buffer, false);
         remember_column(buffer);
-        while (GetCharPressed() != 0) {}
+        while (app_input_char() != 0) {}
         return;
     }
-    bool control = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-    bool super = IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
-    if ((control || super) && IsKeyPressed(KEY_V)) {
+    bool control = app_input_down(KEY_LEFT_CONTROL) || app_input_down(KEY_RIGHT_CONTROL);
+    bool super = app_input_down(KEY_LEFT_SUPER) || app_input_down(KEY_RIGHT_SUPER);
+    if ((control || super) && app_input_pressed(KEY_V)) {
         const char *clipboard = GetClipboardText();
         if (clipboard && !insert_text(buffer, clipboard))
             workspace_editor_message(editor, "cannot insert clipboard", true);
@@ -2240,8 +2289,8 @@ static void update_insert(WorkspaceEditor *editor)
     } else if (editor_key(KEY_DOWN)) {
         move_vertical(buffer, 1, true);
     }
-    if (IsKeyPressed(KEY_HOME)) { buffer->column = 0; remember_column(buffer); }
-    if (IsKeyPressed(KEY_END)) {
+    if (app_input_pressed(KEY_HOME)) { buffer->column = 0; remember_column(buffer); }
+    if (app_input_pressed(KEY_END)) {
         buffer->column = buffer->lines[buffer->row].length;
         remember_column(buffer);
     }
@@ -2249,12 +2298,12 @@ static void update_insert(WorkspaceEditor *editor)
         workspace_editor_message(editor, "cannot edit buffer", true);
     if (editor_key(KEY_DELETE) && !buffer_delete(buffer))
         workspace_editor_message(editor, "cannot edit buffer", true);
-    if (IsKeyPressed(KEY_ENTER) && !buffer_indented_newline(buffer))
+    if (app_input_pressed(KEY_ENTER) && !buffer_indented_newline(buffer))
         workspace_editor_message(editor, "cannot add line", true);
-    if (IsKeyPressed(KEY_TAB) && !buffer_tab(buffer))
+    if (app_input_pressed(KEY_TAB) && !buffer_tab(buffer))
         workspace_editor_message(editor, "cannot insert tab", true);
     int character;
-    while ((character = GetCharPressed()) != 0) {
+    while ((character = app_input_char()) != 0) {
         if (control || super || character < 32 || character == 127) continue;
         int count = 0;
         const char *encoded = CodepointToUTF8(character, &count);
@@ -2290,16 +2339,16 @@ static WorkspaceEditorAction update_command_mode(WorkspaceEditor *editor,
     WorkspaceEditorPrepareRun prepare_run, void *context)
 {
     WorkspaceEditorAction action = WORKSPACE_EDITOR_CONTINUE;
-    if (IsKeyPressed(KEY_ESCAPE)) {
+    if (app_input_pressed(KEY_ESCAPE)) {
         editor->mode = editor->command_previous_mode;
         editor->command[0] = '\0';
         editor->command_length = editor->command_cursor = 0;
-        while (GetCharPressed() != 0) {}
+        while (app_input_char() != 0) {}
         return action;
     }
-    bool control = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-    bool super = IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
-    if ((control || super) && IsKeyPressed(KEY_V)) {
+    bool control = app_input_down(KEY_LEFT_CONTROL) || app_input_down(KEY_RIGHT_CONTROL);
+    bool super = app_input_down(KEY_LEFT_SUPER) || app_input_down(KEY_RIGHT_SUPER);
+    if ((control || super) && app_input_pressed(KEY_V)) {
         const char *clipboard = GetClipboardText();
         if (clipboard) {
             for (; *clipboard; ++clipboard) {
@@ -2341,16 +2390,16 @@ static WorkspaceEditorAction update_command_mode(WorkspaceEditor *editor,
                ((unsigned char)editor->command[editor->command_cursor] & 0xc0) == 0x80)
             ++editor->command_cursor;
     }
-    if (IsKeyPressed(KEY_HOME)) editor->command_cursor = 0;
-    if (IsKeyPressed(KEY_END)) editor->command_cursor = editor->command_length;
+    if (app_input_pressed(KEY_HOME)) editor->command_cursor = 0;
+    if (app_input_pressed(KEY_END)) editor->command_cursor = editor->command_length;
     int character;
-    while ((character = GetCharPressed()) != 0) {
+    while ((character = app_input_char()) != 0) {
         if (control || super || character < 32 || character == 127) continue;
         int count = 0;
         const char *encoded = CodepointToUTF8(character, &count);
         if (count > 0) command_insert(editor, encoded, (size_t)count);
     }
-    if (IsKeyPressed(KEY_ENTER)) {
+    if (app_input_pressed(KEY_ENTER)) {
         editor->mode = editor->command_previous_mode;
         action = execute_editor_command(editor, prepare_run, context);
         editor->command[0] = '\0';
@@ -2376,7 +2425,7 @@ static void browser_enter(WorkspaceEditor *editor)
 
 static void update_browser(WorkspaceEditor *editor)
 {
-    if (IsKeyPressed(KEY_ESCAPE)) {
+    if (app_input_pressed(KEY_ESCAPE)) {
         editor->mode = EDITOR_NORMAL;
         return;
     }
@@ -2384,25 +2433,25 @@ static void update_browser(WorkspaceEditor *editor)
         if (editor->selected) --editor->selected;
     } else if (editor_key(KEY_DOWN) || editor_key(KEY_J)) {
         if (editor->selected + 1 < editor->entry_count) ++editor->selected;
-    } else if (IsKeyPressed(KEY_HOME)) {
+    } else if (app_input_pressed(KEY_HOME)) {
         editor->selected = 0;
-    } else if (IsKeyPressed(KEY_END) && editor->entry_count) {
+    } else if (app_input_pressed(KEY_END) && editor->entry_count) {
         editor->selected = editor->entry_count - 1;
-    } else if (IsKeyPressed(KEY_PAGE_UP)) {
+    } else if (app_input_pressed(KEY_PAGE_UP)) {
         editor->selected = editor->selected > 10 ? editor->selected - 10 : 0;
-    } else if (IsKeyPressed(KEY_PAGE_DOWN) && editor->entry_count) {
+    } else if (app_input_pressed(KEY_PAGE_DOWN) && editor->entry_count) {
         editor->selected += 10;
         if (editor->selected >= editor->entry_count)
             editor->selected = editor->entry_count - 1;
     }
-    if (IsKeyPressed(KEY_H)) {
+    if (app_input_pressed(KEY_H)) {
         char parent[EDITOR_PATH_CAPACITY];
         if (path_parent(editor->cwd, parent)) (void)browser_open(editor, parent);
-    } else if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_L)) {
+    } else if (app_input_pressed(KEY_ENTER) || app_input_pressed(KEY_L)) {
         browser_enter(editor);
     }
     int character;
-    while ((character = GetCharPressed()) != 0) {
+    while ((character = app_input_char()) != 0) {
         if (character == ':') {
             enter_command_mode(editor, EDITOR_BROWSER);
             break;
@@ -2470,22 +2519,29 @@ WorkspaceEditorAction workspace_editor_update(WorkspaceEditor *editor,
 {
     WorkspaceEditorAction action = WORKSPACE_EDITOR_CONTINUE;
     if (!editor) return action;
+    AppKeyScope scope=editor->code_info ? APP_INFO : editor->mode==EDITOR_INSERT ? APP_INSERT :
+        editor->mode==EDITOR_COMMAND ? APP_COMMAND : editor->mode==EDITOR_BROWSER ? APP_BROWSER :
+        visual_mode(editor) ? APP_VISUAL : APP_NORMAL;
+    app_input_scope(scope);
+    if (app_input_resets_operator()) editor->pending_operator=0;
+    if (app_input_command())
+        return workspace_editor_command(editor,app_input_command(),prepare_run,context);
     if (editor->code_info) {
         EditorBuffer *info=editor->code_info;
-        if (IsKeyPressed(KEY_ESCAPE)) close_code_info(editor);
+        if (app_input_pressed(KEY_ESCAPE)) close_code_info(editor);
         else {
             if (editor_key(KEY_UP) || editor_key(KEY_K)) { if (info->top) --info->top; }
             if (editor_key(KEY_DOWN) || editor_key(KEY_J)) ++info->top;
-            if (IsKeyPressed(KEY_PAGE_UP)) info->top=info->top>10 ? info->top-10 : 0;
-            if (IsKeyPressed(KEY_PAGE_DOWN)) info->top+=10;
-            if (IsKeyPressed(KEY_HOME)) info->top=0;
-            if (IsKeyPressed(KEY_END)) info->top=info->line_count-1;
+            if (app_input_pressed(KEY_PAGE_UP)) info->top=info->top>10 ? info->top-10 : 0;
+            if (app_input_pressed(KEY_PAGE_DOWN)) info->top+=10;
+            if (app_input_pressed(KEY_HOME)) info->top=0;
+            if (app_input_pressed(KEY_END)) info->top=info->line_count-1;
             if (editor_key(KEY_LEFT)) info->left=info->left>4 ? info->left-4 : 0;
             if (editor_key(KEY_RIGHT)) info->left+=4;
             if (info->top>=info->line_count) info->top=info->line_count-1;
             if (info->left>EDITOR_DRAW_CAPACITY) info->left=EDITOR_DRAW_CAPACITY;
         }
-        while (GetCharPressed()!=0) {}
+        while (app_input_char()!=0) {}
         return action;
     }
     EditorBuffer *before = current_buffer(editor);
@@ -2639,8 +2695,8 @@ bool workspace_editor_pointer(WorkspaceEditor *editor, Rectangle box,
     }
     bool inside = pointer.position.x >= box.x && pointer.position.x < box.x + box.width &&
                   pointer.position.y >= view.body_top && pointer.position.y < view.body_bottom;
-    editor->wheel_remainder.x += pointer.wheel.x*3;
-    editor->wheel_remainder.y += pointer.wheel.y*3;
+    editor->wheel_remainder.x += pointer.wheel.x*app_config_current()->scroll_lines;
+    editor->wheel_remainder.y += pointer.wheel.y*app_config_current()->scroll_lines;
     int x = (int)editor->wheel_remainder.x, y = (int)editor->wheel_remainder.y;
     editor->wheel_remainder.x -= x; editor->wheel_remainder.y -= y;
     if (editor->code_info) {
@@ -2863,7 +2919,9 @@ static void draw_code_info(WorkspaceEditor *editor,Rectangle box,int cell_width)
         display_slice(&info->lines[info->top+(size_t)row],info->left,(size_t)columns,visible);
         ui_text_draw(visible,x+8,y+(row+1)*EDITOR_ROW_HEIGHT+5,EDITOR_FONT_SIZE,(Color){211,222,231,255});
     }
-    ui_text_draw("Esc close | Arrows scroll",x+8,y+(rows+1)*EDITOR_ROW_HEIGHT+5,16,(Color){172,143,255,255});
+    char close[128],footer[192]; app_config_describe(APP_INFO,"escape",close,sizeof(close));
+    snprintf(footer,sizeof(footer),"%s close | configured movement keys scroll",close);
+    ui_text_draw(footer,x+8,y+(rows+1)*EDITOR_ROW_HEIGHT+5,16,(Color){172,143,255,255});
 }
 
 static const char *mode_name(EditorMode mode)

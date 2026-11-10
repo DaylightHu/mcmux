@@ -125,7 +125,7 @@ int main(void)
     uint8_t previous_carry = output_power(world, CARRY);
 
     bool input_a = true;
-    bool input_b = true;
+    bool input_b = false;
     bool input_c = true;
 
     double start = mcmux_monotonic_seconds();

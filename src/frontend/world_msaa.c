@@ -2,8 +2,6 @@
 #include "rlgl.h"
 #include "external/glad.h"
 
-enum { WORLD_MSAA_SAMPLES = 4 };
-
 void world_msaa_destroy(WorldMsaa *target)
 {
     if (target->id) glDeleteFramebuffers(1, &target->id);
@@ -12,20 +10,21 @@ void world_msaa_destroy(WorldMsaa *target)
     *target = (WorldMsaa){0};
 }
 
-void world_msaa_prepare(WorldMsaa *target, int width, int height)
+void world_msaa_prepare(WorldMsaa *target, int width, int height, int samples)
 {
-    if (target->width == width && target->height == height) return;
+    if (target->width == width && target->height == height && target->samples == samples) return;
     world_msaa_destroy(target);
     target->width = width;
     target->height = height;
-    if (width <= 0 || height <= 0) return;
+    target->samples = samples;
+    if (samples == 0 || width <= 0 || height <= 0) return;
 
     GLint max_samples = 0, max_size = 0;
     glGetIntegerv(GL_MAX_SAMPLES, &max_samples);
     glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_size);
-    if (max_samples < WORLD_MSAA_SAMPLES || width > max_size || height > max_size) return;
+    if (max_samples < samples || width > max_size || height > max_size) return;
 
-    WorldMsaa next = {.width = width, .height = height};
+    WorldMsaa next = {.width = width, .height = height, .samples = samples};
     glGenFramebuffers(1, &next.id);
     glGenRenderbuffers(1, &next.color);
     glGenRenderbuffers(1, &next.depth);
@@ -40,12 +39,12 @@ void world_msaa_prepare(WorldMsaa *target, int width, int height)
     glGetIntegerv(GL_RENDERBUFFER_BINDING, &renderbuffer);
     glBindFramebuffer(GL_FRAMEBUFFER, next.id);
     glBindRenderbuffer(GL_RENDERBUFFER, next.color);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, WORLD_MSAA_SAMPLES,
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples,
                                      GL_RGBA8, width, height);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                               GL_RENDERBUFFER, next.color);
     glBindRenderbuffer(GL_RENDERBUFFER, next.depth);
-    glRenderbufferStorageMultisample(GL_RENDERBUFFER, WORLD_MSAA_SAMPLES,
+    glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples,
                                      GL_DEPTH_COMPONENT24, width, height);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                               GL_RENDERBUFFER, next.depth);

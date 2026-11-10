@@ -3,12 +3,12 @@
 
 typedef struct {
     unsigned int id, color, depth;
-    int width, height;
+    int width, height, samples;
 } WorldMsaa;
 
 /* An unavailable target has id == 0. Cache the attempted size to avoid
  * retrying an unsupported allocation every frame. */
-void world_msaa_prepare(WorldMsaa *target, int width, int height);
+void world_msaa_prepare(WorldMsaa *target, int width, int height, int samples);
 void world_msaa_destroy(WorldMsaa *target);
 
 /* Resolve color into an existing single-sample target of the same size
