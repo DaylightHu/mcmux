@@ -1,4 +1,3 @@
-![Background](./res/gui/title_background.png)
 # mcmux
 mcmux is an experimental redstone simulator written in C, based on Minecraft 1.16.2. It started as a project to learn raylib and later evolved into an effort to combine redstone construction with programming.
 
