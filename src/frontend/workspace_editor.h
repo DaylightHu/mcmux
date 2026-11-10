@@ -37,8 +37,7 @@ typedef struct {
 bool workspace_editor_pointer(WorkspaceEditor *editor, Rectangle box,
                               WorkspaceEditorPointer pointer);
 void workspace_editor_cancel_pointer(WorkspaceEditor *editor);
-void workspace_editor_draw(WorkspaceEditor *editor, Rectangle box, int pane,
-                           bool focused, bool zoomed);
+void workspace_editor_draw(WorkspaceEditor *editor, Rectangle box, bool focused);
 void workspace_editor_message(WorkspaceEditor *editor, const char *text,
                               bool error);
 
