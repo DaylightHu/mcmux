@@ -1863,6 +1863,10 @@ static bool initialize(GuiApp *app, WorldSessionManager *world_sessions)
 #endif
     SetConfigFlags(window_flags);
     InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "mcmux");
+    if (!IsWindowReady()) {
+        fprintf(stderr, "Cannot open the mcmux window\n");
+        return false;
+    }
     SetWindowMinSize(1000, 650);
     SetExitKey(KEY_NULL);
     SetTargetFPS(settings->fps_limit);
@@ -1929,7 +1933,7 @@ static void shutdown_gui(GuiApp *app)
     inventory_unload(&app->inventory);
     block_renderer_unload(&app->blocks);
     ui_font_unload();
-    CloseWindow();
+    if (IsWindowReady()) CloseWindow();
 }
 
 static Rectangle pane_rectangle(WorkspaceRect box)

@@ -254,10 +254,10 @@ static const char *compiler(void)
 
 static bool supported_platform(void)
 {
-#if defined(__APPLE__) || defined(_WIN32)
+#if defined(__APPLE__) || defined(_WIN32) || defined(__linux__)
     return true;
 #else
-    nob_log(NOB_ERROR, "Machinecraft currently supports macOS and Windows builds");
+    nob_log(NOB_ERROR, "Machinecraft currently supports macOS, Windows, and Linux builds");
     return false;
 #endif
 }
@@ -268,6 +268,8 @@ static const char *platform_name(void)
     return "macos";
 #elif defined(_WIN32)
     return "windows";
+#elif defined(__linux__)
+    return "linux";
 #else
     return "unsupported";
 #endif
@@ -372,21 +374,31 @@ static bool parse_dependency_file(const char *path, Files *files)
     return true;
 }
 
-static void append_dependency_scan_flags(Nob_Cmd *command, bool macos)
+typedef enum {
+    VENDOR_MACOS,
+    VENDOR_WINDOWS,
+    VENDOR_LINUX,
+} Vendor_Platform;
+
+static void append_dependency_scan_flags(Nob_Cmd *command, Vendor_Platform platform)
 {
     nob_cmd_append(command,
         "-MM", "-MG", "-nostdinc", "-x", "c",
+        "-U__APPLE__", "-U__MACH__", "-U__CYGWIN__",
+        "-U_WIN32", "-UWIN32", "-U__WIN32__", "-U__MINGW32__", "-U__MINGW64__",
         "-U__linux__", "-U__FreeBSD__", "-U__OpenBSD__",
         "-U__NetBSD__", "-U__DragonFly__");
 
-    if (macos) {
-        nob_cmd_append(command,
-            "-U_WIN32", "-UWIN32", "-U__WIN32__",
-            "-U__MINGW32__", "-U__MINGW64__", "-U__CYGWIN__",
-            "-D__APPLE__=1", "-D__MACH__=1");
-    } else {
-        nob_cmd_append(command,
-            "-U__APPLE__", "-U__MACH__", "-U__CYGWIN__", "-D_WIN32=1");
+    switch (platform) {
+    case VENDOR_MACOS:
+        nob_cmd_append(command, "-D__APPLE__=1", "-D__MACH__=1");
+        break;
+    case VENDOR_WINDOWS:
+        nob_cmd_append(command, "-D_WIN32=1");
+        break;
+    case VENDOR_LINUX:
+        nob_cmd_append(command, "-D__linux__=1", "-D_GLFW_X11");
+        break;
     }
 
     nob_cmd_append(command,
@@ -440,17 +452,18 @@ static bool collect_vendor_files(Files *files)
     if (!verify_raylib_version()) return false;
 
     static const struct {
-        bool macos;
+        Vendor_Platform platform;
         const char *output;
     } scans[] = {
-        {true,  "build/vendor/deps-macos.d"},
-        {false, "build/vendor/deps-windows.d"},
+        {VENDOR_MACOS,   "build/vendor/deps-macos.d"},
+        {VENDOR_WINDOWS, "build/vendor/deps-windows.d"},
+        {VENDOR_LINUX,   "build/vendor/deps-linux.d"},
     };
 
     Nob_Cmd command = {0};
     for (size_t scan = 0; scan < NOB_ARRAY_LEN(scans); ++scan) {
         nob_cmd_append(&command, compiler());
-        append_dependency_scan_flags(&command, scans[scan].macos);
+        append_dependency_scan_flags(&command, scans[scan].platform);
         for (size_t index = 0; index < NOB_ARRAY_LEN(raylib_sources); ++index) {
             nob_cmd_append(&command, raylib_sources[index]);
         }
@@ -561,6 +574,8 @@ static bool compile_raylib_source(const char *source, const Files *dependencies,
             "-I" RAYLIB_SRC "/external/glfw/include");
 #if defined(_WIN32)
         nob_cmd_append(&command, "-DUNICODE");
+#elif defined(__linux__)
+        nob_cmd_append(&command, "-D_DEFAULT_SOURCE", "-D_GLFW_X11", "-pthread");
 #endif
 #if defined(__APPLE__)
         if (ends_with(source, "/rglfw.c")) nob_cmd_append(&command, "-x", "objective-c");
@@ -595,6 +610,8 @@ static bool link_target(const char *output, const Files *objects)
 #elif defined(_WIN32)
     nob_cmd_append(&command,
         "-lopengl32", "-lgdi32", "-lwinmm", "-lshell32");
+#elif defined(__linux__)
+    nob_cmd_append(&command, "-lGL", "-lX11", "-lm", "-pthread", "-ldl");
 #endif
 
     return nob_cmd_run(&command);
@@ -680,6 +697,7 @@ static bool build_machinecraft(void)
 
     if (!collect_vendor_files(&vendor_files)) goto cleanup;
     files_add(&vendor_files, RAYLIB_CONFIG);
+    files_add(&vendor_files, "nob.c");
     if (!compile_sources(gui_sources, NOB_ARRAY_LEN(gui_sources),
                          &headers, &gui_objects)) goto cleanup;
     for (size_t index = 0; index < NOB_ARRAY_LEN(raylib_sources); ++index) {
@@ -1172,7 +1190,7 @@ static void print_help(const char *program)
     printf("  build        Build the GUI (default)\n");
     printf("  gui          Build only the GUI\n");
     printf("  run          Build and run the GUI from the repository root\n");
-    printf("  vendor-list  Print vendored files required by macOS and Windows\n");
+    printf("  vendor-list  Print vendored files required by macOS, Windows, and Linux\n");
     printf("  precommit    Stage required raylib/TOML files and verify an index-only build\n");
     printf("  reader       Build build/inspect_structure, a standalone .mcs reader\n");
     printf("  benchmark    Generate C queries, compile and run the full redstone suite\n");
