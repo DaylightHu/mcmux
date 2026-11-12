@@ -4,7 +4,7 @@
 
 static const char *const shared_commands[] = {"tick", "plot"};
 static const char *const edit_commands[] = {"pos1", "pos2", "copy", "paste", "stack", "move", "undo", "redo", "schem"};
-static const char *const schem_commands[] = {"save"};
+static const char *const schem_commands[] = {"save", "load"};
 static const char *const schem_flags[] = {"-f"};
 static const char *const paste_flags[] = {"-a"};
 static const char *const tick_commands[] = {"freeze", "step", "noupdate"};

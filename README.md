@@ -80,6 +80,7 @@ when targeting any other block or empty space.
 | `//move [DISTANCE] DIRECTION` | Move the selected blocks. |
 | `//undo` / `//redo` | Undo or redo the last selection edit. |
 | `//schem save [-f] NAME [X Y Z]` | Save the selection beside the current world's `.mcw`; `-f` replaces an existing file. |
+| `//schem load NAME` | Load an `.mcs` beside the current world's `.mcw` into the clipboard, preserving its anchor and container contents. Use `//paste X Y Z` to place it. |
 | `/tick freeze` | Toggle automatic ticking. |
 | `/tick step NUMBER` | Run a fixed number of ticks while frozen. |
 | `/tick noupdate` | Toggle block callbacks and neighbor updates. |
