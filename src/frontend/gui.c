@@ -1867,6 +1867,16 @@ static bool initialize(GuiApp *app, WorldSessionManager *world_sessions)
         fprintf(stderr, "Cannot open the mcmux window\n");
         return false;
     }
+#if defined(__linux__)
+    Image icon = LoadImage(gui_asset_path("res/icon.png"));
+    if (icon.data) {
+        ImageFormat(&icon, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+        SetWindowIcon(icon);
+        UnloadImage(icon);
+    } else {
+        TraceLog(LOG_WARNING, "Cannot load mcmux window icon");
+    }
+#endif
     SetWindowMinSize(1000, 650);
     SetExitKey(KEY_NULL);
     SetTargetFPS(settings->fps_limit);
