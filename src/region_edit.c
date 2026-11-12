@@ -198,6 +198,63 @@ RsResult region_editor_copy(RegionEditor *e, const BlockPos *anchor)
     return RS_OK;
 }
 
+RsResult region_editor_load_structure(RegionEditor *e, const Structure *structure)
+{
+    RsResult result=ready(e);
+    if (result!=RS_OK) return result;
+    if (!structure) return fail(e,RS_INVALID_ARGUMENT,"No structure to load");
+    StructureInfo info=structure_info(structure);
+    if (!info.volume || info.volume>EDIT_BLOCK_LIMIT)
+        return fail(e,RS_INVALID_ARGUMENT,"Structure exceeds the clipboard cell limit");
+    int64_t max_x=(int64_t)info.origin.x+info.width-1;
+    int64_t max_y=(int64_t)info.origin.y+info.height-1;
+    int64_t max_z=(int64_t)info.origin.z+info.length-1;
+    if (max_x>INT_MAX || max_y>INT_MAX || max_z>INT_MAX)
+        return fail(e,RS_OUT_OF_BOUNDS,"Structure coordinates overflow");
+    Snapshot next={.bounds={.min=info.origin,
+        .max={(int)max_x,(int)max_y,(int)max_z},.volume=info.volume},
+        .anchor=info.anchor,.container_capacity=info.container_count};
+    next.cells=malloc(info.volume*sizeof(*next.cells));
+    if (info.container_count)
+        next.containers=calloc(info.container_count,sizeof(*next.containers));
+    if (!next.cells || (info.container_count && !next.containers)) {
+        snapshot_destroy(&next);
+        return fail(e,RS_OUT_OF_MEMORY,"Cannot allocate the structure clipboard");
+    }
+    RegionBounds local={.max={(int)info.width-1,(int)info.height-1,
+                               (int)info.length-1},.volume=info.volume};
+    for (size_t i=0; i<info.volume; ++i) {
+        BlockPos pos=cell_pos(local,i);
+        if (!structure_get(structure,pos,&next.cells[i])) {
+            result=RS_INVALID_ARGUMENT;
+            break;
+        }
+        size_t slots=structure_container_size(structure,pos);
+        if (!slots) continue;
+        if (next.container_count==next.container_capacity || slots>27) {
+            result=RS_INVALID_ARGUMENT;
+            break;
+        }
+        StoredContainer *container=&next.containers[next.container_count++];
+        container->cell=i;
+        for (size_t slot=0; slot<slots; ++slot) {
+            if (structure_get_container_slot(structure,pos,slot,
+                    &container->slots[slot])!=STRUCTURE_OK) {
+                result=RS_INVALID_ARGUMENT;
+                break;
+            }
+        }
+        if (result!=RS_OK) break;
+    }
+    if (result!=RS_OK) {
+        snapshot_destroy(&next);
+        return fail(e,result,"Cannot read the structure clipboard");
+    }
+    snapshot_destroy(&e->clipboard);
+    e->clipboard=next;
+    return RS_OK;
+}
+
 static bool translated(World *w, RegionBounds b, int64_t x, int64_t y, int64_t z,
                         RegionBounds *out)
 {
@@ -510,7 +567,7 @@ RsResult region_editor_paste(RegionEditor *e, BlockPos anchor, bool skip_air, si
     RsResult result=ready(e);
     if (result!=RS_OK) return result;
     Snapshot *s=&e->clipboard;
-    if (!s->cells) return fail(e,RS_INVALID_ARGUMENT,"Clipboard is empty; use copy first");
+    if (!s->cells) return fail(e,RS_INVALID_ARGUMENT,"Clipboard is empty; use copy or schem load first");
     RegionBounds target;
     if (!translated(e->world,s->bounds,(int64_t)anchor.x-s->anchor.x,
         (int64_t)anchor.y-s->anchor.y,(int64_t)anchor.z-s->anchor.z,&target))

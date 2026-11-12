@@ -78,6 +78,12 @@ bool edit_command_parse(const char *line, EditCommand *command)
         if (*cursor) *cursor++='\0';
     }
     if (kind==EDIT_SCHEM_SAVE) {
+        if (count==2 && !strcmp(args[0],"load")) {
+            if (strlen(args[1])>=sizeof(command->name)) return true;
+            strcpy(command->name,args[1]);
+            command->kind=EDIT_SCHEM_LOAD;
+            return true;
+        }
         if (count<2 || strcmp(args[0],"save")) return true;
         size_t output=1;
         for (size_t i=1;i<count;++i) {
@@ -128,7 +134,8 @@ bool edit_command_parse(const char *line, EditCommand *command)
     command->kind=kind; return true;
 }
 
-static RsResult save_structure(GameSession *session, const EditCommand *c,
+static RsResult structure_path(GameSession *session, const EditCommand *c,
+                               char *path, size_t path_capacity,
                                char *message, size_t capacity)
 {
     size_t length=strlen(c->name);
@@ -145,11 +152,6 @@ static RsResult save_structure(GameSession *session, const EditCommand *c,
             return RS_INVALID_ARGUMENT;
         }
     }
-    RegionBounds bounds;
-    if (!region_editor_bounds(game_session_editor(session),&bounds)) {
-        snprintf(message,capacity,"Set both pos1 and pos2 first");
-        return RS_INVALID_ARGUMENT;
-    }
     const char *save_path=game_session_path(session);
     if (!save_path || !*save_path) {
         snprintf(message,capacity,"Current world has no save path");
@@ -160,13 +162,25 @@ static RsResult save_structure(GameSession *session, const EditCommand *c,
     const char *backslash=strrchr(save_path,'\\');
     if (!separator || (backslash && backslash>separator)) separator=backslash;
 #endif
-    size_t directory_length=separator ? (size_t)(separator-save_path) : 0;
-    char path[GAME_SESSION_PATH_CAPACITY];
-    int written=snprintf(path,sizeof(path),"%.*s%s%.*s.mcs",
-        (int)directory_length,save_path,directory_length ? "/" : "",
-        (int)length,c->name);
-    if (written<=0 || written>=(int)sizeof(path)) {
+    size_t directory_length=separator ? (size_t)(separator-save_path)+1 : 0;
+    int written=snprintf(path,path_capacity,"%.*s%.*s.mcs",
+        (int)directory_length,save_path,(int)length,c->name);
+    if (written<=0 || (size_t)written>=path_capacity) {
         snprintf(message,capacity,"Structure path is too long");
+        return RS_INVALID_ARGUMENT;
+    }
+    return RS_OK;
+}
+
+static RsResult save_structure(GameSession *session, const EditCommand *c,
+                               char *message, size_t capacity)
+{
+    char path[GAME_SESSION_PATH_CAPACITY];
+    RsResult result=structure_path(session,c,path,sizeof(path),message,capacity);
+    if (result!=RS_OK) return result;
+    RegionBounds bounds;
+    if (!region_editor_bounds(game_session_editor(session),&bounds)) {
+        snprintf(message,capacity,"Set both pos1 and pos2 first");
         return RS_INVALID_ARGUMENT;
     }
     StructureResult saved;
@@ -185,6 +199,36 @@ static RsResult save_structure(GameSession *session, const EditCommand *c,
     return saved==STRUCTURE_OK ? RS_OK : saved==STRUCTURE_OUT_OF_MEMORY ? RS_OUT_OF_MEMORY : RS_INVALID_ARGUMENT;
 }
 
+static RsResult load_structure(GameSession *session, const EditCommand *c,
+                               char *message, size_t capacity)
+{
+    char path[GAME_SESSION_PATH_CAPACITY];
+    RsResult result=structure_path(session,c,path,sizeof(path),message,capacity);
+    if (result!=RS_OK) return result;
+    StructureResult loaded;
+    Structure *structure=structure_read(path,&loaded);
+    if (!structure) {
+        snprintf(message,capacity,"%s",structure_result_name(loaded));
+        switch (loaded) {
+        case STRUCTURE_OUT_OF_MEMORY: return RS_OUT_OF_MEMORY;
+        case STRUCTURE_IO_ERROR: return RS_IO_ERROR;
+        case STRUCTURE_CORRUPT: return RS_CORRUPT_DATA;
+        case STRUCTURE_UNSUPPORTED: return RS_UNSUPPORTED;
+        default: return RS_INVALID_ARGUMENT;
+        }
+    }
+    RegionEditor *editor=game_session_editor(session);
+    result=region_editor_load_structure(editor,structure);
+    if (result==RS_OK) {
+        StructureInfo info=structure_info(structure);
+        snprintf(message,capacity,
+            "Loaded %zu cells from %s; anchor (%d, %d, %d). Use //paste X Y Z",
+            info.volume,c->name,info.anchor.x,info.anchor.y,info.anchor.z);
+    } else snprintf(message,capacity,"%s",region_editor_error(editor));
+    structure_destroy(structure);
+    return result;
+}
+
 RsResult edit_command_run(GameSession *session, const EditCommand *c,
                           EditCommandContext context, char *message, size_t capacity)
 {
@@ -198,6 +242,8 @@ RsResult edit_command_run(GameSession *session, const EditCommand *c,
     switch (c->kind) {
     case EDIT_SCHEM_SAVE:
         return save_structure(session,c,message,capacity);
+    case EDIT_SCHEM_LOAD:
+        return load_structure(session,c,message,capacity);
     case EDIT_POS1: case EDIT_POS2:
         if (!has_position) {
             snprintf(message,capacity,"Use pos1 X Y Z or pos2 X Y Z");
@@ -241,7 +287,7 @@ RsResult edit_command_run(GameSession *session, const EditCommand *c,
             c->kind==EDIT_UNDO ? "Undid" : "Redid",changed);
         break;
     default:
-        snprintf(message,capacity,"Use pos1|pos2 [X Y Z], copy [X Y Z], paste [-a] [X Y Z], stack|move [COUNT] [DIRECTION], undo, redo, or schem save [-f] NAME [X Y Z]");
+        snprintf(message,capacity,"Use pos1|pos2|copy|paste|stack|move|undo|redo; //schem save [-f] NAME [X Y Z] or //schem load NAME");
         return RS_INVALID_ARGUMENT;
     }
     if (result!=RS_OK) snprintf(message,capacity,"%s",region_editor_error(e)[0] ? region_editor_error(e) : rs_result_name(result));

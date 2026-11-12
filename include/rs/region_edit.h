@@ -2,6 +2,7 @@
 #define RS_REGION_EDIT_H
 
 #include "world.h"
+#include "structure.h"
 
 typedef struct RegionEditor RegionEditor;
 typedef struct { BlockPos min, max; size_t volume; } RegionBounds;
@@ -17,6 +18,11 @@ unsigned region_editor_selection(const RegionEditor *editor, BlockPos *first,
 bool region_editor_bounds(const RegionEditor *editor, RegionBounds *bounds);
 /* A NULL copy anchor uses the minimum corner. Paste keeps this anchor offset. */
 RsResult region_editor_copy(RegionEditor *editor, const BlockPos *anchor);
+/* Copy a structure into the clipboard, retaining its saved anchor and
+ * inventories. No selection is required; world, selection and history stay
+ * unchanged. The structure remains caller-owned. Failure keeps the clipboard. */
+RsResult region_editor_load_structure(RegionEditor *editor,
+                                       const Structure *structure);
 RsResult region_editor_paste(RegionEditor *editor, BlockPos anchor, bool skip_air,
                              size_t *changed);
 RsResult region_editor_stack(RegionEditor *editor, uint32_t copies,

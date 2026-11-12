@@ -979,7 +979,7 @@ static void update_command(GuiApp *app)
     } else {
         error = true;
         snprintf(app->message, sizeof(app->message),
-                 "Use pos1|pos2|copy|paste|stack|move|undo|redo|schem, tick freeze|step|noupdate, or plot info|expand|shrink");
+                 "Use pos1|pos2|copy|paste|stack|move|undo|redo, schem save|load, tick freeze|step|noupdate, or plot info|expand|shrink");
     }
     add_chat_message(app, app->message, error);
     if (app->plot_command.pending) {

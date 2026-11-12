@@ -80,12 +80,22 @@ when targeting any other block or empty space.
 | `//move [DISTANCE] DIRECTION` | Move the selected blocks. |
 | `//undo` / `//redo` | Undo or redo the last selection edit. |
 | `//schem save [-f] NAME [X Y Z]` | Save the selection beside the current world's `.mcw`; `-f` replaces an existing file. |
+| `//schem load NAME` | Load an `.mcs` beside the current world's `.mcw` into the clipboard, preserving its anchor and container contents. Use `//paste X Y Z` to place it. |
 | `/tick freeze` | Toggle automatic ticking. |
 | `/tick step NUMBER` | Run a fixed number of ticks while frozen. |
 | `/tick noupdate` | Toggle block callbacks and neighbor updates. |
 | `/plot info` | Show the current plot bounds. |
 | `/plot expand DIRECTION [COUNT]` | Expand the plot. |
 | `/plot shrink DIRECTION [COUNT]` | Shrink the plot; confirm if edits would be deleted. |
+
+Structure names accept an optional `.mcs` extension, with the same portable
+letters, digits, `-` and `_` as `//schem save`. Loading does not change the world
+or the selection; a failed load keeps the previous clipboard. Pasting retains
+the normal `-a`, undo and redo behavior.
+
+For example, place `demo-cancel-clear-wiring.mcs` in `saves/examples/`, open the
+`examples` world, then run `//schem load demo-cancel-clear-wiring` followed by
+`//paste 43 6 23` to place its saved anchor at its original position.
 
 ## World directories
 
