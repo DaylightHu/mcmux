@@ -67,6 +67,10 @@ mc-nvim is the text workspace inside mcmux. The available editor actions are:
 World and simulation commands are entered in the GUI with `/` or `//`.
 mc-nvim's `:` commands operate on editor files and programs.
 
+When the crosshair targets redstone dust, the top-left HUD shows its current
+power level (0–15), including while ticking is frozen. The power line is hidden
+when targeting any other block or empty space.
+
 | Command | Purpose |
 | --- | --- |
 | `//pos1 X Y Z` / `//pos2 X Y Z` | Set the inclusive selection corners. |

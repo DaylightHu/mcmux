@@ -1572,6 +1572,16 @@ static void draw_selection(GuiApp *app)
     }
 }
 
+static void draw_redstone_hud(const World *world, VoxelHit hit)
+{
+    if (!hit.hit) return;
+    BlockState state = world_get(world, hit.pos);
+    if (state.id != BLOCK_REDSTONE_WIRE) return;
+    ui_text_draw(TextFormat("Redstone power: %u / 15",
+                 (unsigned)state.data.wire.power),
+                 15, 87, 18, DARKBLUE);
+}
+
 static void draw_world(GuiApp *app, VoxelHit hit)
 {
     /* BeginTextureMode already set the viewport and matrices to this size. */
@@ -1612,6 +1622,7 @@ static void draw_world(GuiApp *app, VoxelHit hit)
     ui_text_draw(TextFormat("Facing: %s", horizontal_direction_name(
                  camera_horizontal_direction(&app->camera))),
              15, 63, 18, DARKBLUE);
+    draw_redstone_hud(game_session_world(app->session), hit);
     hotbar_draw(&app->hotbar, &app->inventory);
 }
 
