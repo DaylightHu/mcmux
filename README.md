@@ -88,15 +88,6 @@ when targeting any other block or empty space.
 | `/plot expand DIRECTION [COUNT]` | Expand the plot. |
 | `/plot shrink DIRECTION [COUNT]` | Shrink the plot; confirm if edits would be deleted. |
 
-Structure names accept an optional `.mcs` extension, with the same portable
-letters, digits, `-` and `_` as `//schem save`. Loading does not change the world
-or the selection; a failed load keeps the previous clipboard. Pasting retains
-the normal `-a`, undo and redo behavior.
-
-For example, place `demo-cancel-clear-wiring.mcs` in `saves/examples/`, open the
-`examples` world, then run `//schem load demo-cancel-clear-wiring` followed by
-`//paste 43 6 23` to place its saved anchor at its original position.
-
 ## World directories
 
 Each world is stored as a self-contained directory under `saves/`. The
