@@ -15,6 +15,7 @@ typedef struct {
     BlockState *cells;
     StoredContainer *containers;
     size_t container_count, container_capacity;
+    bool skip_air;
 } Snapshot;
 typedef struct {
     BlockPos pos;
@@ -146,6 +147,15 @@ static BlockPos cell_pos(RegionBounds b, size_t index)
         (int)((int64_t)b.min.z + (int64_t)((index/x)%z))};
 }
 
+/* Inverse of cell_pos for a position already known to be inside the bounds. */
+static size_t cell_index(RegionBounds b, BlockPos p)
+{
+    size_t width=(size_t)((int64_t)b.max.x-b.min.x+1);
+    size_t length=(size_t)((int64_t)b.max.z-b.min.z+1);
+    return ((size_t)((int64_t)p.y-b.min.y)*length+(size_t)((int64_t)p.z-b.min.z))*width
+        +(size_t)((int64_t)p.x-b.min.x);
+}
+
 static RsResult snapshot_read(RegionEditor *e, RegionBounds bounds, Snapshot *s)
 {
     *s = (Snapshot){.bounds=bounds, .anchor=bounds.min};
@@ -185,7 +195,8 @@ static const StoredContainer *snapshot_container(const Snapshot *s, size_t cell)
     return lo<s->container_count && s->containers[lo].cell == cell ? &s->containers[lo] : NULL;
 }
 
-RsResult region_editor_copy(RegionEditor *e, const BlockPos *anchor)
+RsResult region_editor_copy_with_options(RegionEditor *e, const BlockPos *anchor,
+                                        bool skip_air)
 {
     RegionBounds b;
     RsResult result = selected_bounds(e,&b);
@@ -194,8 +205,14 @@ RsResult region_editor_copy(RegionEditor *e, const BlockPos *anchor)
     result = snapshot_read(e,b,&next);
     if (result != RS_OK) { snapshot_destroy(&next); return result; }
     if (anchor) next.anchor = *anchor;
+    next.skip_air = skip_air;
     snapshot_destroy(&e->clipboard); e->clipboard = next;
     return RS_OK;
+}
+
+RsResult region_editor_copy(RegionEditor *e, const BlockPos *anchor)
+{
+    return region_editor_copy_with_options(e,anchor,false);
 }
 
 RsResult region_editor_load_structure(RegionEditor *e, const Structure *structure)
@@ -573,13 +590,13 @@ RsResult region_editor_paste(RegionEditor *e, BlockPos anchor, bool skip_air, si
         (int64_t)anchor.y-s->anchor.y,(int64_t)anchor.z-s->anchor.z,&target))
         return fail(e,RS_OUT_OF_BOUNDS,"Paste would extend outside the world");
     EditPlan plan={0};
-    result=plan_snapshot(e,&plan,s,target,skip_air);
+    result=plan_snapshot(e,&plan,s,target,skip_air || s->skip_air);
     if (result==RS_OK) result=apply_recorded_plan(e,&plan,changed);
     plan_destroy(&plan); return result;
 }
 
 static RsResult repeat_or_move(RegionEditor *e, uint32_t amount, Direction direction,
-                               bool move, size_t *changed)
+                               bool move, bool skip_air, size_t *changed)
 {
     if (changed) *changed=0;
     RegionBounds bounds;
@@ -601,8 +618,13 @@ static RsResult repeat_or_move(RegionEditor *e, uint32_t amount, Direction direc
     EditPlan plan={0};
     if (result==RS_OK && move)
         for (size_t i=0; i<bounds.volume && result==RS_OK; ++i) {
+            if (skip_air && s.cells[i].id==BLOCK_AIR) continue;
             BlockPos p=cell_pos(bounds,i);
-            if (!inside(last,p)) result=plan_cell(e,&plan,p,block_default(BLOCK_AIR),NULL);
+            if (inside(last,p)) {
+                /* An overlap is overwritten only if its incoming cell is copied. */
+                if (!skip_air || s.cells[cell_index(last,p)].id!=BLOCK_AIR) continue;
+            }
+            result=plan_cell(e,&plan,p,block_default(BLOCK_AIR),NULL);
         }
     uint32_t copies=move ? 1 : amount;
     for (uint32_t n=1; n<=copies && result==RS_OK; ++n) {
@@ -611,18 +633,30 @@ static RsResult repeat_or_move(RegionEditor *e, uint32_t amount, Direction direc
         if (!translated(e->world,bounds,axis.x*step,axis.y*step,axis.z*step,&target)) {
             result=RS_OUT_OF_BOUNDS; break;
         }
-        result=plan_snapshot(e,&plan,&s,target,false);
+        result=plan_snapshot(e,&plan,&s,target,skip_air);
     }
     if (result==RS_OK) result=apply_recorded_plan(e,&plan,changed);
     plan_destroy(&plan); snapshot_destroy(&s); return result;
 }
 
+RsResult region_editor_stack_with_options(RegionEditor *e, uint32_t copies,
+                                         Direction direction, bool skip_air, size_t *changed)
+{
+    return repeat_or_move(e,copies,direction,false,skip_air,changed);
+}
+
 RsResult region_editor_stack(RegionEditor *e, uint32_t copies, Direction direction, size_t *changed)
 {
-    return repeat_or_move(e,copies,direction,false,changed);
+    return region_editor_stack_with_options(e,copies,direction,false,changed);
+}
+
+RsResult region_editor_move_with_options(RegionEditor *e, uint32_t distance,
+                                        Direction direction, bool skip_air, size_t *changed)
+{
+    return repeat_or_move(e,distance,direction,true,skip_air,changed);
 }
 
 RsResult region_editor_move(RegionEditor *e, uint32_t distance, Direction direction, size_t *changed)
 {
-    return repeat_or_move(e,distance,direction,true,changed);
+    return region_editor_move_with_options(e,distance,direction,false,changed);
 }

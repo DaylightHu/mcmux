@@ -6,7 +6,7 @@ static const char *const shared_commands[] = {"tick", "plot"};
 static const char *const edit_commands[] = {"pos1", "pos2", "copy", "paste", "stack", "move", "undo", "redo", "schem"};
 static const char *const schem_commands[] = {"save", "load"};
 static const char *const schem_flags[] = {"-f"};
-static const char *const paste_flags[] = {"-a"};
+static const char *const air_flags[] = {"-a"};
 static const char *const tick_commands[] = {"freeze", "step", "noupdate"};
 static const char *const plot_commands[] = {"info", "expand", "shrink"};
 static const char *const plot_directions[] = {"east", "west", "south", "north"};
@@ -53,21 +53,26 @@ bool command_complete(CommandCompletion *state, char *line, size_t capacity)
     size_t prefix = strlen(word);
     const char *choices[COUNT(shared_commands) + COUNT(edit_commands) + COUNT(directions)];
     size_t choices_count = 0;
+    bool directional_edit = strcmp(name, "stack") == 0 || strcmp(name, "move") == 0;
 #define ADD(array) do { \
     for (size_t i = 0; i < COUNT(array); ++i) choices[choices_count++] = (array)[i]; \
 } while (0)
     if (count == 1) {
         if (slashes < 2) ADD(shared_commands);
         ADD(edit_commands);
-    } else if (count == 2 && strcmp(name, "paste") == 0) {
-        ADD(paste_flags);
+    } else if (directional_edit || strcmp(name, "copy") == 0 || strcmp(name, "paste") == 0) {
+        size_t arguments = 0;
+        bool has_air_flag = false;
+        for (size_t i = 1; i + 1 < count; ++i) {
+            if (strcmp(tokens[i], "-a") == 0) has_air_flag = true;
+            else ++arguments;
+        }
+        if (directional_edit && arguments < 2) ADD(directions);
+        if (!has_air_flag && arguments <= (directional_edit ? 2u : 3u)) ADD(air_flags);
     } else if (count == 2 && strcmp(name, "schem") == 0) {
         ADD(schem_commands);
     } else if (count == 3 && strcmp(name, "schem") == 0 && strcmp(tokens[1], "save") == 0) {
         ADD(schem_flags);
-    } else if ((count == 2 || count == 3) &&
-               (strcmp(name, "stack") == 0 || strcmp(name, "move") == 0)) {
-        ADD(directions);
     } else if (count == 2 && strcmp(name, "tick") == 0) {
         ADD(tick_commands);
     } else if (count == 2 && strcmp(name, "plot") == 0) {

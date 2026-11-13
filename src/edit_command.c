@@ -1,4 +1,5 @@
 #include "edit_command.h"
+#include "region_edit_internal.h"
 #include "rs/structure.h"
 
 #include <errno.h>
@@ -101,7 +102,7 @@ bool edit_command_parse(const char *line, EditCommand *command)
         }
         command->kind=kind; return true;
     }
-    if (kind==EDIT_PASTE) {
+    if (kind==EDIT_COPY || kind==EDIT_PASTE || kind==EDIT_STACK || kind==EDIT_MOVE) {
         size_t output=0;
         for (size_t i=0;i<count;++i) {
             if (!strcmp(args[i],"-a")) {
@@ -254,10 +255,11 @@ RsResult edit_command_run(GameSession *session, const EditCommand *c,
             c->kind==EDIT_POS1 ? 1u : 2u,pos.x,pos.y,pos.z);
         break;
     case EDIT_COPY:
-        result=region_editor_copy(e,has_position ? &pos : NULL);
+        result=region_editor_copy_with_options(e,has_position ? &pos : NULL,c->skip_air);
         if (result==RS_OK) {
             RegionBounds b; (void)region_editor_bounds(e,&b);
-            snprintf(message,capacity,"Copied %zu blocks; anchor (%d, %d, %d)",b.volume,
+            snprintf(message,capacity,"Copied %zu cells%s; anchor (%d, %d, %d)",b.volume,
+                c->skip_air ? " (air skipped on paste)" : "",
                 has_position ? pos.x : b.min.x,has_position ? pos.y : b.min.y,has_position ? pos.z : b.min.z);
         }
         break;
@@ -275,8 +277,9 @@ RsResult edit_command_run(GameSession *session, const EditCommand *c,
             snprintf(message,capacity,"Specify east, west, up, down, south or north");
             return RS_INVALID_ARGUMENT;
         }
-        result=c->kind==EDIT_STACK ? region_editor_stack(e,c->count,direction,&changed) :
-            region_editor_move(e,c->count,direction,&changed);
+        result=c->kind==EDIT_STACK ?
+            region_editor_stack_with_options(e,c->count,direction,c->skip_air,&changed) :
+            region_editor_move_with_options(e,c->count,direction,c->skip_air,&changed);
         if (result==RS_OK) snprintf(message,capacity,"%s: %zu blocks changed",
             c->kind==EDIT_STACK ? "Stacked" : "Moved",changed);
         break;
