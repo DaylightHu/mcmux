@@ -74,10 +74,10 @@ when targeting any other block or empty space.
 | Command | Purpose |
 | --- | --- |
 | `//pos1 X Y Z` / `//pos2 X Y Z` | Set the inclusive selection corners. |
-| `//copy [X Y Z]` | Copy the selection with an optional anchor. |
+| `//copy [-a] [X Y Z]` | Copy the selection with an optional anchor; `-a` skips air on subsequent pastes of this clipboard. |
 | `//paste [-a] X Y Z` | Paste at an anchor; `-a` skips air. |
-| `//stack [COUNT] DIRECTION` | Add repeated copies in a direction. |
-| `//move [DISTANCE] DIRECTION` | Move the selected blocks. |
+| `//stack [-a] [COUNT] DIRECTION` | Add repeated copies in a direction; `-a` skips air. |
+| `//move [-a] [DISTANCE] DIRECTION` | Move the selected blocks; `-a` moves only non-air blocks. |
 | `//undo` / `//redo` | Undo or redo the last selection edit. |
 | `//schem save [-f] NAME [X Y Z]` | Save the selection beside the current world's `.mcw`; `-f` replaces an existing file. |
 | `//schem load NAME` | Load an `.mcs` beside the current world's `.mcw` into the clipboard, preserving its anchor and container contents. Use `//paste X Y Z` to place it. |
